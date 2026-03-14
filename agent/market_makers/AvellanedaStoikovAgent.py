@@ -75,9 +75,7 @@ class AvellanedaStoikovAgent(TradingAgent):
         mtype = msg.body["msg"]
 
         if mtype == "QUERY_SPREAD" and self.state == "AWAITING_SPREAD":
-            # (A-S math will be injected here in a later step)
-            self.state = "AWAITING_WAKEUP"
-            self.setWakeup(currentTime + self.getWakeFrequency())
+            self._update_quotes(currentTime)
 
         elif mtype in ("ORDER_EXECUTED", "ORDER_CANCELLED"):
             if currentTime < self.horizon_end:
@@ -125,3 +123,58 @@ class AvellanedaStoikovAgent(TradingAgent):
             return 0.0
         tau = max(0.0, min(1.0, remaining / total))
         return tau
+
+    # ------------------------------------------------------------------
+    #  Avellaneda-Stoikov core math
+    # ------------------------------------------------------------------
+    def _avellaneda_stoikov(self, mid, q_t, sigma2, tau):
+        gamma = max(self.gamma, 1e-12)
+        k = max(self.k, 1e-12)
+
+        # Reservation price
+        r_t = mid - (q_t * gamma * sigma2 * tau)
+
+        # Optimal half-spread (asymptotic expansion)
+        delta = (gamma * sigma2 * tau / 2.0) + ((1.0 / gamma) * np.log1p(gamma / k))
+
+        return r_t, max(delta, self.tick_size / self.price_scale)
+
+    def _quotes_to_cents(self, r_t, delta, q_t):
+        bid = int(np.floor((r_t - delta) * self.price_scale))
+        ask = int(np.ceil((r_t + delta) * self.price_scale))
+
+        # Sanity: ask must be strictly above bid
+        if ask <= bid:
+            ask = bid + self.tick_size
+
+        # Inventory skew guardrails
+        if q_t >= self.max_inventory:
+            bid = min(bid, ask - self.tick_size)
+        if q_t <= -self.max_inventory:
+            ask = max(ask, bid + self.tick_size)
+
+        return bid, ask
+
+    # ------------------------------------------------------------------
+    #  Quote update orchestrator
+    # ------------------------------------------------------------------
+    def _update_quotes(self, currentTime):
+        mid_cents = self._compute_mid_cents()
+        if mid_cents is None:
+            self.state = "AWAITING_WAKEUP"
+            self.setWakeup(currentTime + self.getWakeFrequency())
+            return
+
+        self._update_mid_history(currentTime, mid_cents)
+
+        sigma2 = self._estimate_sigma2()
+        q_t = self.getHoldings(self.symbol)
+        tau = self._remaining_horizon_fraction(currentTime)
+
+        mid = mid_cents / self.price_scale
+        r_t, delta = self._avellaneda_stoikov(mid, q_t, sigma2, tau)
+        bid_cents, ask_cents = self._quotes_to_cents(r_t, delta, q_t)
+
+        self._reprice_quotes(bid_cents, ask_cents)
+        self.state = "AWAITING_WAKEUP"
+        self.setWakeup(currentTime + self.getWakeFrequency())
