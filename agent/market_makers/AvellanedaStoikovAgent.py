@@ -178,3 +178,37 @@ class AvellanedaStoikovAgent(TradingAgent):
         self._reprice_quotes(bid_cents, ask_cents)
         self.state = "AWAITING_WAKEUP"
         self.setWakeup(currentTime + self.getWakeFrequency())
+
+    # ------------------------------------------------------------------
+    #  Strict order management (Cancel / Replace)
+    # ------------------------------------------------------------------
+    def _reprice_quotes(self, bid_cents, ask_cents):
+        open_orders = list(self.orders.values())
+        bid_orders = [o for o in open_orders if o.is_buy_order and o.symbol == self.symbol]
+        ask_orders = [o for o in open_orders if not o.is_buy_order and o.symbol == self.symbol]
+
+        # Cancel stale bids
+        for o in bid_orders:
+            if o.limit_price != bid_cents:
+                self.cancelOrder(o)
+
+        # Cancel stale asks
+        for o in ask_orders:
+            if o.limit_price != ask_cents:
+                self.cancelOrder(o)
+
+        # Check whether target prices are already covered
+        has_bid = any(o.limit_price == bid_cents for o in bid_orders)
+        has_ask = any(o.limit_price == ask_cents for o in ask_orders)
+
+        inv = self.getHoldings(self.symbol)
+
+        if not has_bid and inv < self.max_inventory:
+            self.placeLimitOrder(self.symbol, self.order_size, True, bid_cents)
+
+        if not has_ask and inv > -self.max_inventory:
+            self.placeLimitOrder(self.symbol, self.order_size, False, ask_cents)
+
+        mid_cents = int(round((bid_cents + ask_cents) / 2))
+        log_print("{} | inv={} mid={} bid={} ask={}",
+                  self.name, inv, mid_cents, bid_cents, ask_cents)
