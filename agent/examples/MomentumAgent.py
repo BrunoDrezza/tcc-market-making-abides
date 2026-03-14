@@ -50,15 +50,22 @@ class MomentumAgent(TradingAgent):
             self.state = 'AWAITING_WAKEUP'
         elif self.subscribe and self.state == 'AWAITING_MARKET_DATA' and msg.body['msg'] == 'MARKET_DATA':
             bids, asks = self.known_bids[self.symbol], self.known_asks[self.symbol]
-            if bids and asks: self.placeOrders(bids[0][0], asks[0][0])
+            if bids and asks: 
+                self.placeOrders(bids[0][0], asks[0][0])
             self.state = 'AWAITING_MARKET_DATA'
 
     def placeOrders(self, bid, ask):
         """ Momentum Agent actions logic """
+        
         if bid and ask:
             self.mid_list.append((bid + ask) / 2)
-            if len(self.mid_list) > 20: self.avg_20_list.append(MomentumAgent.ma(self.mid_list, n=20)[-1].round(2))
-            if len(self.mid_list) > 50: self.avg_50_list.append(MomentumAgent.ma(self.mid_list, n=50)[-1].round(2))
+
+            if len(self.mid_list) > 20: 
+                self.avg_20_list.append(MomentumAgent.ma(self.mid_list, n=20)[-1].round(2))
+
+            if len(self.mid_list) > 50: 
+                    self.avg_50_list.append(MomentumAgent.ma(self.mid_list, n=50)[-1].round(2))
+
             if len(self.avg_20_list) > 0 and len(self.avg_50_list) > 0:
                 if self.avg_20_list[-1] >= self.avg_50_list[-1]:
                     self.placeLimitOrder(self.symbol, quantity=self.size, is_buy_order=True, limit_price=ask)

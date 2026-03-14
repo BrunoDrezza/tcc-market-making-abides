@@ -12,4 +12,3 @@ A provisão de liquidez em alta frequência (HFT) expõe os formadores de mercad
 - Rentabilidade e controle de risco de inventário.
 - Dinâmica de ajuste do *bid-ask spread*.
 - Impacto da aversão ao risco ($\gamma$) na formulação de preços.
-
