@@ -48,3 +48,44 @@ class AvellanedaStoikovAgent(TradingAgent):
     # ------------------------------------------------------------------
     def getWakeFrequency(self):
         return pd.Timedelta(self.wake_up_freq)
+
+    # ------------------------------------------------------------------
+    #  Lifecycle
+    # ------------------------------------------------------------------
+    def wakeup(self, currentTime):
+        can_trade = super().wakeup(currentTime)
+        if not can_trade:
+            return
+
+        if self.horizon_end is None:
+            self.horizon_end = self.mkt_close
+
+        if currentTime >= self.horizon_end:
+            self.cancelAllOrders()
+            return
+
+        self.getCurrentSpread(self.symbol, depth=1)
+        self.state = "AWAITING_SPREAD"
+
+    # ------------------------------------------------------------------
+    #  Message routing
+    # ------------------------------------------------------------------
+    def receiveMessage(self, currentTime, msg):
+        super().receiveMessage(currentTime, msg)
+        mtype = msg.body["msg"]
+
+        if mtype == "QUERY_SPREAD" and self.state == "AWAITING_SPREAD":
+            # (A-S math will be injected here in a later step)
+            self.state = "AWAITING_WAKEUP"
+            self.setWakeup(currentTime + self.getWakeFrequency())
+
+        elif mtype in ("ORDER_EXECUTED", "ORDER_CANCELLED"):
+            if currentTime < self.horizon_end:
+                self.setWakeup(currentTime + self.requote_delay)
+
+    # ------------------------------------------------------------------
+    #  Helpers
+    # ------------------------------------------------------------------
+    def cancelAllOrders(self):
+        for order in list(self.orders.values()):
+            self.cancelOrder(order)
