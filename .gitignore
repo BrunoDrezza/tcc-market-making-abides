@@ -1,0 +1,22 @@
+*.png
+__pycache__/
+batch_output/
+cache/
+local/
+log/
+.idea/
+results/
+util/crypto/datasets
+venv/
+.idea/
+.ipynb/
+.ipynb_checkpoints/
+
+# Ignora o ambiente virtual
+ABIDES_Enviroment/
+
+# Ignora arquivos de cache do Python
+*.pyc
+
+# Ignora pastas do sistema operacional
+.DS_Store
