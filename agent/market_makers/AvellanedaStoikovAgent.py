@@ -89,3 +89,39 @@ class AvellanedaStoikovAgent(TradingAgent):
     def cancelAllOrders(self):
         for order in list(self.orders.values()):
             self.cancelOrder(order)
+
+    # ------------------------------------------------------------------
+    #  Data preparation & estimators
+    # ------------------------------------------------------------------
+    def _compute_mid_cents(self):
+        bid, _, ask, _ = self.getKnownBidAsk(self.symbol)
+        if bid is None or ask is None:
+            return self.last_trade.get(self.symbol, None)
+        return int(round((bid + ask) / 2))
+
+    def _update_mid_history(self, currentTime, mid_cents):
+        mid_dollars = mid_cents / self.price_scale
+        self.mid_history = pd.concat(
+            [self.mid_history, pd.Series([mid_dollars], index=[currentTime])]
+        )
+        max_len = 10 * self.vol_window
+        if len(self.mid_history) > max_len:
+            self.mid_history = self.mid_history.iloc[-max_len:]
+
+    def _estimate_sigma2(self):
+        series = self.mid_history.dropna()
+        if len(series) < 5:
+            return self.min_sigma ** 2
+        log_returns = np.log(series).diff().dropna()
+        sigma = log_returns.rolling(self.vol_window).std(ddof=1).iloc[-1]
+        if np.isnan(sigma) or sigma < self.min_sigma:
+            sigma = self.min_sigma
+        return sigma * sigma
+
+    def _remaining_horizon_fraction(self, currentTime):
+        total = (self.horizon_end - self.mkt_open).total_seconds()
+        remaining = (self.horizon_end - currentTime).total_seconds()
+        if total <= 0:
+            return 0.0
+        tau = max(0.0, min(1.0, remaining / total))
+        return tau
