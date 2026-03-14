@@ -212,3 +212,6 @@ class AvellanedaStoikovAgent(TradingAgent):
         mid_cents = int(round((bid_cents + ask_cents) / 2))
         log_print("{} | inv={} mid={} bid={} ask={}",
                   self.name, inv, mid_cents, bid_cents, ask_cents)
+        self.logEvent("AS_QUOTE",
+                      "{} | inv={} mid={} bid={} ask={}".format(
+                          self.name, inv, mid_cents, bid_cents, ask_cents))
