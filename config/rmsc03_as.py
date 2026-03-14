@@ -132,7 +132,8 @@ if args.config_help:
 
 log_dir = args.log_dir  # Requested log directory.
 seed = args.seed  # Random seed specification on the command line.
-if not seed: seed = int(pd.Timestamp.now().timestamp() * 1000000) % (2 ** 32 - 1)
+if not seed: 
+    seed = int(pd.Timestamp.now().timestamp() * 1000000) % (2 ** 32 - 1)
 np.random.seed(seed)
 
 util.silent_mode = not args.verbose
