@@ -17,7 +17,8 @@ class AvellanedaStoikovAgent(TradingAgent):
                  order_size=100, wake_up_freq='1s',
                  gamma=0.1, k=1.5, vol_window=60,
                  min_sigma=1e-4, max_inventory=5000,
-                 horizon_end=None):
+                 horizon_end=None,
+                 mkt_open=None, mkt_close=None):
 
         super().__init__(id, name, type,
                          starting_cash=starting_cash,
@@ -35,7 +36,8 @@ class AvellanedaStoikovAgent(TradingAgent):
         self.vol_window = vol_window  # rolling window (in ticks) for σ estimation
         self.min_sigma = min_sigma  # floor for estimated volatility
         self.max_inventory = max_inventory  # absolute inventory limit
-        self.horizon_end = horizon_end      # pd.Timestamp for session end (T)
+        self.mkt_open = mkt_open
+        self.horizon_end = mkt_close          # pd.Timestamp for session end (T)
 
         # --- Internal state ---
         self.price_scale = 100.0          # dollars → cents multiplier
@@ -52,6 +54,10 @@ class AvellanedaStoikovAgent(TradingAgent):
     # ------------------------------------------------------------------
     #  Lifecycle
     # ------------------------------------------------------------------
+    def kernelStarting(self, startTime):
+        super().kernelStarting(startTime)
+        self.setWakeup(startTime + pd.Timedelta(self.wake_up_freq))
+
     def wakeup(self, currentTime):
         can_trade = super().wakeup(currentTime)
         if not can_trade:
@@ -117,6 +123,8 @@ class AvellanedaStoikovAgent(TradingAgent):
         return sigma * sigma
 
     def _remaining_horizon_fraction(self, currentTime):
+        if self.mkt_open is None or self.horizon_end is None:
+            return 0.0
         total = (self.horizon_end - self.mkt_open).total_seconds()
         remaining = (self.horizon_end - currentTime).total_seconds()
         if total <= 0:
