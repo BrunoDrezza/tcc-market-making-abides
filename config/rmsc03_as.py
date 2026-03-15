@@ -292,7 +292,9 @@ agents.extend([AvellanedaStoikovAgent(id=agent_count,
                                       k=1.5,
                                       vol_window=60,
                                       max_inventory=5000,
-                                      log_orders=log_orders,
+                                      mkt_open=mkt_open,
+                                      mkt_close=mkt_close,
+                                      log_orders=True,
                                       random_state=np.random.RandomState(seed=np.random.randint(low=0, high=2 ** 32,
                                                                                                 dtype='uint64')))])
 agent_count += 1

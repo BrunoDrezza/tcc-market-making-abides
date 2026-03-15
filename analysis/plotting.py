@@ -8,7 +8,7 @@ import os
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-sns.set_theme(style="whitegrid")
+sns.set(style="whitegrid")
 
 
 def plot_inventory_dynamics(parsed_df, output_dir):
