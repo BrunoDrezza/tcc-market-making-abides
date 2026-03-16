@@ -1,101 +1,63 @@
-"""
-analysis/parser.py
-Reads raw ABIDES .bz2 pickle logs and extracts Avellaneda-Stoikov quote data.
-"""
-
+import pandas as pd
+import numpy as np
 import os
 import re
-import pandas as pd
 
-# ---------------------------------------------------------------------------
-#  Regex for the AS_QUOTE event string produced by AvellanedaStoikovAgent
-#  Format: "AVELLANEDA_STOIKOV_AGENT | inv={inv} mid={mid} bid={bid} ask={ask}"
-# ---------------------------------------------------------------------------
-_AS_PATTERN = re.compile(
-    r"inv=(?P<inv>-?\d+)\s+"
-    r"mid=(?P<mid>[\d.]+)\s+"
-    r"bid=(?P<bid>[\d.]+)\s+"
-    r"ask=(?P<ask>[\d.]+)"
-)
-
-
-def load_agent_log(log_dir: str,
-                   agent_name: str = "AVELLANEDA_STOIKOV_AGENT") -> pd.DataFrame:
-    """Load the raw ABIDES agent log from its .bz2 pickle file.
-
-    Parameters
-    ----------
-    log_dir : str
-        Path to the simulation log directory (e.g. ``log/TCC_AS_Experiment``).
-    agent_name : str
-        Agent filename stem (without the .bz2 extension).
-
-    Returns
-    -------
-    pd.DataFrame
-        Rows that contain AS quote data (``inv=`` **and** ``mid=``).
-    """
+def load_agent_log(log_dir, agent_name="AVELLANEDA_STOIKOV_AGENT"):
+    print(f"Loading agent log from: {log_dir}")
     filepath = os.path.join(log_dir, f"{agent_name}.bz2")
-    if not os.path.isfile(filepath):
-        raise FileNotFoundError(
-            f"Agent log not found: {filepath}\n"
-            "Make sure the simulation was run with log_orders enabled "
-            "and the agent name matches."
-        )
-
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Agent log not found: {filepath}\nMake sure the simulation was run with log_orders enabled and the agent name matches.")
+    
+    # Read the pickle directly
     df = pd.read_pickle(filepath)
+    return df
 
-    # Identify the column that holds the event string.
-    # In ABIDES the log DataFrame normally has EventType and Event columns,
-    # with EventTime as the index.  Our custom rows use EventType == "AS_QUOTE"
-    # and the formatted string lives in the Event column.
-    text_col = "Event"
-    if text_col not in df.columns:
-        # Fallback: pick the first object-dtype column
-        obj_cols = df.select_dtypes(include="object").columns
-        if len(obj_cols) == 0:
-            raise ValueError("No string column found in the agent log DataFrame.")
-        text_col = obj_cols[0]
+def parse_as_metrics(df):
+    print("Parsing AS quote metrics...")
+    
+    # 1. Filtra apenas os eventos que nós criamos
+    if 'EventType' in df.columns:
+        df_quotes = df[df['EventType'] == 'AS_QUOTE'].copy()
+    else:
+        # Fallback caso o ABIDES tenha mudado o nome da coluna
+        text_col = 'Event' if 'Event' in df.columns else df.columns[-1]
+        df_quotes = df[df[text_col].astype(str).str.contains("inv=")].copy()
+        
+    if df_quotes.empty:
+        print("\n[RAIO-X DO ARQUIVO BZ2] O que realmente tem dentro do log:")
+        print("\n--> Contagem de Eventos:")
+        print(df['EventType'].value_counts() if 'EventType' in df.columns else "Coluna EventType não encontrada.")
+        print("\n--> Últimas 10 linhas do log (onde deveria estar o final da simulação):")
+        print(df.tail(10))
+        raise ValueError("Nenhum evento 'AS_QUOTE' foi encontrado no log.")
 
-    # Keep only rows where the text column contains the key markers.
-    mask = df[text_col].astype(str).str.contains("inv=") & \
-           df[text_col].astype(str).str.contains("mid=")
-    return df.loc[mask].copy()
+    # 2. Descobre qual é a coluna de texto
+    text_col = 'Event' if 'Event' in df_quotes.columns else 'Message'
+    if text_col not in df_quotes.columns:
+        text_col = df_quotes.columns[-1]
 
+    # 3. Regex super flexível para extrair os números
+    regex = r"inv=(?P<inv>[-\d\.]+)\s+mid=(?P<mid>[-\d\.]+)\s+bid=(?P<bid>[-\d\.]+)\s+ask=(?P<ask>[-\d\.]+)"
+    extracted = df_quotes[text_col].str.extract(regex)
+    
+    # 4. Junta tudo e limpa
+    parsed_df = pd.concat([df_quotes, extracted], axis=1)
+    parsed_df = parsed_df.dropna(subset=['inv', 'mid', 'bid', 'ask'])
+    
+    if parsed_df.empty:
+        print("\n[DEBUG] O Regex falhou. Veja como os textos estão salvos no arquivo:")
+        print(df_quotes[text_col].head())
+        raise ValueError("Nenhuma linha correspondeu ao padrão esperado do Regex.")
 
-def parse_as_metrics(df: pd.DataFrame) -> pd.DataFrame:
-    """Extract numeric inv / mid / bid / ask from filtered log rows.
+    # 5. Converte para números
+    for col in ['inv', 'mid', 'bid', 'ask']:
+        parsed_df[col] = pd.to_numeric(parsed_df[col], errors='coerce')
 
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Output of :func:`load_agent_log` (already filtered to AS_QUOTE rows).
-
-    Returns
-    -------
-    pd.DataFrame
-        Indexed by ``EventTime`` (datetime) with float columns
-        ``inv``, ``mid``, ``bid``, ``ask``.
-    """
-    text_col = "Event" if "Event" in df.columns else df.select_dtypes(include="object").columns[0]
-
-    records = []
-    for idx, row in df.iterrows():
-        m = _AS_PATTERN.search(str(row[text_col]))
-        if m is None:
-            continue
-        records.append({
-            "EventTime": idx if isinstance(idx, pd.Timestamp) else row.get("EventTime", idx),
-            "inv": float(m.group("inv")),
-            "mid": float(m.group("mid")),
-            "bid": float(m.group("bid")),
-            "ask": float(m.group("ask")),
-        })
-
-    if not records:
-        raise ValueError("No AS quote rows matched the expected pattern.")
-
-    result = pd.DataFrame(records)
-    result["EventTime"] = pd.to_datetime(result["EventTime"])
-    result.set_index("EventTime", inplace=True)
-    return result
+    # 6. Arruma o índice de tempo
+    if 'EventTime' in parsed_df.columns:
+        parsed_df['EventTime'] = pd.to_datetime(parsed_df['EventTime'])
+        parsed_df.set_index('EventTime', inplace=True)
+        
+    print(f"Sucesso! {len(parsed_df)} cotações processadas.")
+    return parsed_df[['inv', 'mid', 'bid', 'ask']]
