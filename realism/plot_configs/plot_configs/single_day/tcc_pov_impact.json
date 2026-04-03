@@ -1,0 +1,47 @@
+{
+  "ONLY_EXECUTED": false,
+  "CLIPPED_START_TIME": "09:30:00",
+  "CLIPPED_FINISH_TIME": "11:30:00",
+  "CACHE_FILE": "cache/tcc_pov_cache.pkl",
+  "USE_CACHE": false,
+  "SPREAD_PLOT_LOG_SCALE": false,
+  "ORDERBOOK_IMBALANCE_PLOT_LOG_SCALE": false,
+  "COMPUTE_IMPACT_STATS": false,
+  "PLOT_PARAMS_DICT": {
+    "baseline_label": "Baseline (POV 1%)",
+    "execution_label": "POV ",
+    "shade_start_datetime": "10:00:00",
+    "shade_end_datetime": "11:00:00",
+    "output_file_path": "visualizations/tcc_pov_impact_final.png",
+    "experiment_name": "TCC_POV",
+    "execution_agent_name": "POV_EXECUTION_AGENT",
+    "log_dir": "../log/",
+    "spread_lookback": "1s"
+  },
+  "PLOT_DATA": [
+    {
+      "participation_of_volume": 0.05,
+      "seed": 1234,
+      "no_execution_exchange_path": "../log/TCC_POV_01/EXCHANGE_AGENT.bz2",
+      "no_execution_orderbook_path": "../log/TCC_POV_01/ORDERBOOK_ABM_FULL.bz2",
+      "yes_execution_exchange_path": "../log/TCC_POV_05/EXCHANGE_AGENT.bz2",
+      "yes_execution_orderbook_path": "../log/TCC_POV_05/ORDERBOOK_ABM_FULL.bz2"
+    },
+    {
+      "participation_of_volume": 0.10,
+      "seed": 1234,
+      "no_execution_exchange_path": "../log/TCC_POV_01/EXCHANGE_AGENT.bz2",
+      "no_execution_orderbook_path": "../log/TCC_POV_01/ORDERBOOK_ABM_FULL.bz2",
+      "yes_execution_exchange_path": "../log/TCC_POV_10/EXCHANGE_AGENT.bz2",
+      "yes_execution_orderbook_path": "../log/TCC_POV_10/ORDERBOOK_ABM_FULL.bz2"
+    },
+    {
+      "participation_of_volume": 0.50,
+      "seed": 1234,
+      "no_execution_exchange_path": "../log/TCC_POV_01/EXCHANGE_AGENT.bz2",
+      "no_execution_orderbook_path": "../log/TCC_POV_01/ORDERBOOK_ABM_FULL.bz2",
+      "yes_execution_exchange_path": "../log/TCC_POV_50/EXCHANGE_AGENT.bz2",
+      "yes_execution_orderbook_path": "../log/TCC_POV_50/ORDERBOOK_ABM_FULL.bz2"
+    }
+  ]
+}

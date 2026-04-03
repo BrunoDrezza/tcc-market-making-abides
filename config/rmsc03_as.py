@@ -1,10 +1,11 @@
-# RMSC-3 (Reference Market Simulation Configuration):
+# RMSC-3 + Avellaneda-Stoikov Market Maker
 # - 1     Exchange Agent
-# - 1     POV Market Maker Agent
-# - 100   Value Agents
-# - 25    Momentum Agents
 # - 5000  Noise Agents
-# - 1     (Optional) POV Execution agent
+# - 100   Value Agents
+# - 2     Adaptive POV Market Maker Agents
+# - 25    Momentum Agents
+# - 1     Avellaneda-Stoikov Market Maker Agent
+# - 1     (Optional) POV Execution Agent
 
 import argparse
 import numpy as np
@@ -24,12 +25,13 @@ from agent.ValueAgent import ValueAgent
 from agent.market_makers.AdaptiveMarketMakerAgent import AdaptiveMarketMakerAgent
 from agent.examples.MomentumAgent import MomentumAgent
 from agent.execution.POVExecutionAgent import POVExecutionAgent
+from agent.market_makers.AvellanedaStoikovAgent import AvellanedaStoikovAgent
 from model.LatencyModel import LatencyModel
 
 ########################################################################################################################
 ############################################### GENERAL CONFIG #########################################################
 
-parser = argparse.ArgumentParser(description='Detailed options for RMSC03 config.')
+parser = argparse.ArgumentParser(description='Detailed options for RMSC03 + Avellaneda-Stoikov config.')
 
 parser.add_argument('-c',
                     '--config',
@@ -121,6 +123,10 @@ parser.add_argument('--fund-vol',
                     default=1e-8,
                     help='Volatility of fundamental time series.'
                     )
+# --- FLAGS DO ESTUDO DE ABLAÇÃO ---
+parser.add_argument('--use-ofi', action='store_true', help='Ativa a Camada 1 (Preditor OFI)')
+parser.add_argument('--use-hedge', action='store_true', help='Ativa a Camada 2 (Hedge SPY)')
+parser.add_argument('--use-kill-switch', action='store_true', help='Ativa a Camada 3 (Entropia)')
 
 args, remaining_args = parser.parse_known_args()
 
@@ -130,14 +136,15 @@ if args.config_help:
 
 log_dir = args.log_dir  # Requested log directory.
 seed = args.seed  # Random seed specification on the command line.
-if not seed: seed = int(pd.Timestamp.now().timestamp() * 1000000) % (2 ** 32 - 1)
+if not seed: 
+    seed = int(pd.Timestamp.now().timestamp() * 1000000) % (2 ** 32 - 1)
 np.random.seed(seed)
 
 util.silent_mode = not args.verbose
 LimitOrder.silent_mode = not args.verbose
 
 exchange_log_orders = True
-log_orders = True
+log_orders = None
 book_freq = 0
 
 simulation_start_time = dt.datetime.now()
@@ -175,8 +182,6 @@ oracle = SparseMeanRevertingOracle(mkt_open, mkt_close, symbols)
 
 # 1) Exchange Agent
 
-#  How many orders in the past to store for transacted volume computation
-# stream_history_length = int(pd.to_timedelta(args.mm_wake_up_freq).total_seconds() * 100)
 stream_history_length = 25000
 
 agents.extend([ExchangeAgent(id=0,
@@ -197,8 +202,7 @@ agent_count += 1
 
 # 2) Noise Agents
 num_noise = 5000
-noise_mkt_open = historical_date + pd.to_timedelta("09:00:00")  # These times needed for distribution of arrival times
-                                                                # of Noise Agents
+noise_mkt_open = historical_date + pd.to_timedelta("09:00:00")
 noise_mkt_close = historical_date + pd.to_timedelta("16:00:00")
 agents.extend([NoiseAgent(id=j,
                           name="NoiseAgent {}".format(j),
@@ -231,16 +235,6 @@ agent_types.extend(['ValueAgent'])
 
 # 4) Market Maker Agents
 
-"""
-window_size ==  Spread of market maker (in ticks) around the mid price
-pov == Percentage of transacted volume seen in previous `mm_wake_up_freq` that
-       the market maker places at each level
-num_ticks == Number of levels to place orders in around the spread
-wake_up_freq == How often the market maker wakes up
-
-"""
-
-# each elem of mm_params is tuple (window_size, pov, num_ticks, wake_up_freq, min_order_size)
 mm_params = [(args.mm_window_size, args.mm_pov, args.mm_num_ticks, args.mm_wake_up_freq, args.mm_min_order_size),
              (args.mm_window_size, args.mm_pov, args.mm_num_ticks, args.mm_wake_up_freq, args.mm_min_order_size)
              ]
@@ -289,11 +283,34 @@ agents.extend([MomentumAgent(id=j,
 agent_count += num_momentum_agents
 agent_types.extend("MomentumAgent")
 
-# 6) Execution Agent
+# 6) Avellaneda-Stoikov Market Maker Agent
+
+agents.extend([AvellanedaStoikovAgent(id=agent_count,
+                                      name="AVELLANEDA_STOIKOV_AGENT",
+                                      type="AvellanedaStoikovAgent",
+                                      symbol=symbol,
+                                      starting_cash=starting_cash,
+                                      # --- CONECTANDO AS CHAVES DO TERMINAL ---
+                                      use_ofi=args.use_ofi,
+                                      use_hedge=args.use_hedge,
+                                      use_kill_switch=args.use_kill_switch,
+                                      # ----------------------------------------
+                                      order_size=100,
+                                      wake_up_freq='1s',
+                                      gamma=0.05,
+                                      k=100,
+                                      vol_window=60,
+                                      max_inventory=5000,
+                                      mkt_open=mkt_open,
+                                      mkt_close=mkt_close,
+                                      log_orders=True,
+                                      random_state=np.random.RandomState(seed=np.random.randint(low=0, high=2 ** 32, dtype='uint64')))])
+agent_count += 1
+agent_types.extend("AvellanedaStoikovAgent")
+
+# 7) Execution Agent
 
 trade = True if args.execution_agents else False
-
-#### Participation of Volume Agent parameters
 
 pov_agent_start_time = mkt_open + pd.to_timedelta('00:30:00')
 pov_agent_end_time = mkt_close - pd.to_timedelta('00:30:00')
@@ -315,7 +332,7 @@ pov_agent = POVExecutionAgent(id=agent_count,
                               direction=pov_direction,
                               quantity=pov_quantity,
                               trade=trade,
-                              log_orders=True,  # needed for plots so conflicts with others
+                              log_orders=True,
                               random_state=np.random.RandomState(seed=np.random.randint(low=0, high=2 ** 32,
                                                                                           dtype='uint64')))
 
@@ -328,7 +345,7 @@ agent_count += 1
 ########################################################################################################################
 ########################################### KERNEL AND OTHER CONFIG ####################################################
 
-kernel = Kernel("RMSC03 Kernel", random_state=np.random.RandomState(seed=np.random.randint(low=0, high=2 ** 32,
+kernel = Kernel("RMSC03-AS Kernel", random_state=np.random.RandomState(seed=np.random.randint(low=0, high=2 ** 32,
                                                                                                   dtype='uint64')))
 
 kernelStartTime = historical_date
@@ -341,7 +358,6 @@ defaultComputationDelay = 50  # 50 nanoseconds
 latency_rstate = np.random.RandomState(seed=np.random.randint(low=0,high=2**31 - 1))
 pairwise = (agent_count, agent_count)
 
-# All agents sit on line from Seattle to NYC
 nyc_to_seattle_meters = 3866660
 pairwise_distances = util.generate_uniform_random_pairwise_dist_on_line(0.0, nyc_to_seattle_meters, agent_count,
                                                                         random_state=latency_rstate)
