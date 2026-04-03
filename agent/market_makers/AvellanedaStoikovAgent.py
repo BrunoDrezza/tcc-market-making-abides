@@ -157,6 +157,12 @@ class AvellanedaStoikovAgent(TradingAgent):
             self._update_mid_history(currentTime, mid_cents)
             sigma2 = self._estimate_sigma2()
             
+            # --- LAYER 3: KILL SWITCH (Entropia Extrema) ---
+            if self.use_kill_switch and sigma2 > self.kill_switch_sigma2:
+                self.cancelAllOrders()
+                self.logEvent("KILL_SWITCH", f"Volatilidade extrema: {sigma2:.6f}. Ordens suspensas.")
+                return  # O robô fica parado até a volatilidade abaixar
+            
             q_t = self.getHoldings(self.symbol)
             
             # --- LAYER 2: HEDGE SINTÉTICO NO SPY ---
@@ -168,7 +174,6 @@ class AvellanedaStoikovAgent(TradingAgent):
                     self.logEvent("HEDGE_ENTER", f"Inventário={q_t}. SPY Hedge ON. Custo=-{cost}c.")
                 elif abs(q_t) < self.hedge_threshold and self.is_hedged:
                     self.is_hedged = False
-                    # Na saída, pagamos o custo referente ao limite destravado
                     cost = self.hedge_threshold * self.hedge_cost_cents
                     self.cash -= cost  # Paga o spread para desmontar
                     self.logEvent("HEDGE_EXIT", f"Inventário={q_t}. SPY Hedge OFF. Custo=-{cost}c.")
