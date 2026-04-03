@@ -155,19 +155,35 @@ class AvellanedaStoikovAgent(TradingAgent):
         try:
             mid_cents = self._compute_mid_cents()
             self._update_mid_history(currentTime, mid_cents)
-
             sigma2 = self._estimate_sigma2()
+            
             q_t = self.getHoldings(self.symbol)
-            tau = self._remaining_horizon_fraction(currentTime)
+            
+            # --- LAYER 2: HEDGE SINTÉTICO NO SPY ---
+            if self.use_hedge:
+                if abs(q_t) >= self.hedge_threshold and not self.is_hedged:
+                    self.is_hedged = True
+                    cost = abs(q_t) * self.hedge_cost_cents
+                    self.cash -= cost  # Paga o Spread do SPY
+                    self.logEvent("HEDGE_ENTER", f"Inventário={q_t}. SPY Hedge ON. Custo=-{cost}c.")
+                elif abs(q_t) < self.hedge_threshold and self.is_hedged:
+                    self.is_hedged = False
+                    # Na saída, pagamos o custo referente ao limite destravado
+                    cost = self.hedge_threshold * self.hedge_cost_cents
+                    self.cash -= cost  # Paga o spread para desmontar
+                    self.logEvent("HEDGE_EXIT", f"Inventário={q_t}. SPY Hedge OFF. Custo=-{cost}c.")
 
+            tau = self._remaining_horizon_fraction(currentTime)
             mid = mid_cents / self.price_scale
+            
             r_t, delta = self._avellaneda_stoikov(mid, q_t, sigma2, tau, self.ofi_proxy)
             bid_cents, ask_cents = self._quotes_to_cents(r_t, delta, q_t)
 
             self._reprice_quotes(bid_cents, ask_cents)
             
-            log_str = f"inv={q_t} mid={mid_cents} bid={bid_cents} ask={ask_cents}"
+            log_str = f"inv={q_t} mid={mid_cents} bid={bid_cents} ask={ask_cents} ofi={self.ofi_proxy:.2f}"
             self.logEvent("AS_QUOTE", log_str)
+            
         except Exception as e:
             self.logEvent("CRASH_UPDATE", str(e))
 
