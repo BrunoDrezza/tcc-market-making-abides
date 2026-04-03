@@ -79,7 +79,7 @@ Processador de logs pós-simulação. Descompacta os arquivos do ABIDES, filtra 
 
 ---
 
-## ⚙️ Como Executar os Experimentos
+## Como Executar os Experimentos
 
 **1. Rodar o Cenário Base (Teste Simples)**
 ```bash
