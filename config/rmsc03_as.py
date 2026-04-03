@@ -123,6 +123,10 @@ parser.add_argument('--fund-vol',
                     default=1e-8,
                     help='Volatility of fundamental time series.'
                     )
+# --- FLAGS DO ESTUDO DE ABLAÇÃO ---
+parser.add_argument('--use-ofi', action='store_true', help='Ativa a Camada 1 (Preditor OFI)')
+parser.add_argument('--use-hedge', action='store_true', help='Ativa a Camada 2 (Hedge SPY)')
+parser.add_argument('--use-kill-switch', action='store_true', help='Ativa a Camada 3 (Entropia)')
 
 args, remaining_args = parser.parse_known_args()
 
@@ -286,6 +290,11 @@ agents.extend([AvellanedaStoikovAgent(id=agent_count,
                                       type="AvellanedaStoikovAgent",
                                       symbol=symbol,
                                       starting_cash=starting_cash,
+                                      # --- CONECTANDO AS CHAVES DO TERMINAL ---
+                                      use_ofi=args.use_ofi,
+                                      use_hedge=args.use_hedge,
+                                      use_kill_switch=args.use_kill_switch,
+                                      # ----------------------------------------
                                       order_size=100,
                                       wake_up_freq='1s',
                                       gamma=0.05,
@@ -295,8 +304,7 @@ agents.extend([AvellanedaStoikovAgent(id=agent_count,
                                       mkt_open=mkt_open,
                                       mkt_close=mkt_close,
                                       log_orders=True,
-                                      random_state=np.random.RandomState(seed=np.random.randint(low=0, high=2 ** 32,
-                                                                                                dtype='uint64')))])
+                                      random_state=np.random.RandomState(seed=np.random.randint(low=0, high=2 ** 32, dtype='uint64')))])
 agent_count += 1
 agent_types.extend("AvellanedaStoikovAgent")
 
