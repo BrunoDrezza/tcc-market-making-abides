@@ -1,9 +1,9 @@
 import numpy as np
 import pandas as pd
-import traceback
+# import traceback
 
 from agent.TradingAgent import TradingAgent
-from util.util import log_print
+# from util.util import log_print
 
 class AvellanedaStoikovAgent(TradingAgent):
     def __init__(self, id, name, type, symbol, starting_cash,
@@ -12,7 +12,9 @@ class AvellanedaStoikovAgent(TradingAgent):
                  gamma=0.1, k=1.5, vol_window=60,
                  min_sigma=1e-4, max_inventory=5000,
                  horizon_end=None,
-                 mkt_open=None, mkt_close=None):
+                 mkt_open=None, mkt_close=None,
+                 use_ofi=True, use_hedge=False, use_kill_switch=False,
+                 eta_ofi=0.5):
         super().__init__(id, name, type, starting_cash=starting_cash, log_orders=log_orders, random_state=random_state)
         self.log_events = True
         self.symbol = symbol
@@ -29,6 +31,11 @@ class AvellanedaStoikovAgent(TradingAgent):
         self.tick_size = 1                
         self.mid_history = pd.Series(dtype="float64")
         self.last_quotes = {"mid": None}
+        self.use_ofi = use_ofi
+        self.use_hedge = use_hedge
+        self.use_kill_switch = use_kill_switch
+        self.eta_ofi = eta_ofi
+        self.ofi_proxy = 0.0
 
     def getWakeFrequency(self):
         return pd.Timedelta(self.wake_up_freq)
@@ -76,7 +83,14 @@ class AvellanedaStoikovAgent(TradingAgent):
             self.cancelOrder(order)
 
     def _compute_mid_cents(self):
-        bid, _, ask, _ = self.getKnownBidAsk(self.symbol)
+        bid, bid_vol, ask, ask_vol = self.getKnownBidAsk(self.symbol)
+        
+        # --- LAYER 1: CÁLCULO DO OFI PROXY (Desbalanceamento) ---
+        if self.use_ofi and bid_vol is not None and ask_vol is not None and (bid_vol + ask_vol) > 0:
+            self.ofi_proxy = (bid_vol - ask_vol) / (bid_vol + ask_vol)
+        else:
+            self.ofi_proxy = 0.0
+            
         if bid is not None and ask is not None:
             mid = int(round((bid + ask) / 2))
             self.last_quotes["mid"] = mid
@@ -113,10 +127,16 @@ class AvellanedaStoikovAgent(TradingAgent):
             return 0.0
         return max(0.0, min(1.0, remaining / total))
 
-    def _avellaneda_stoikov(self, mid, q_t, sigma2, tau):
+    def _avellaneda_stoikov(self, mid, q_t, sigma2, tau, ofi):
         gamma = max(self.gamma, 1e-12)
         k = max(self.k, 1e-12)
-        r_t = mid - (q_t * gamma * sigma2 * tau)
+        
+        # --- MATEMÁTICA: R_t Clássico vs R_t com Preditor OFI ---
+        if self.use_ofi:
+            r_t = mid - (q_t * gamma * sigma2 * tau) + (self.eta_ofi * ofi)
+        else:
+            r_t = mid - (q_t * gamma * sigma2 * tau)
+        
         delta = (gamma * sigma2 * tau / 2.0) + ((1.0 / gamma) * np.log1p(gamma / k))
         return r_t, max(delta, self.tick_size / self.price_scale)
 
@@ -141,7 +161,7 @@ class AvellanedaStoikovAgent(TradingAgent):
             tau = self._remaining_horizon_fraction(currentTime)
 
             mid = mid_cents / self.price_scale
-            r_t, delta = self._avellaneda_stoikov(mid, q_t, sigma2, tau)
+            r_t, delta = self._avellaneda_stoikov(mid, q_t, sigma2, tau, self.ofi_proxy)
             bid_cents, ask_cents = self._quotes_to_cents(r_t, delta, q_t)
 
             self._reprice_quotes(bid_cents, ask_cents)
