@@ -1,9 +1,8 @@
+import math
 import numpy as np
 import pandas as pd
-import math
-from typing import Dict, Union
+from typing import Dict, Union, Optional
 from collections import deque
-
 from agent.TradingAgent import TradingAgent
 
 
@@ -24,27 +23,27 @@ class AvellanedaStoikovAgent(TradingAgent):
 
     def __init__(
         self,
-        id,
-        name,
-        type,
-        symbol,
-        starting_cash,
-        random_state=None,
-        log_orders=True,
-        order_size=100,
-        wake_up_freq="1s",
-        gamma=0.1,
-        k=1.5,
-        vol_window=60,
-        min_sigma=1e-4,
-        max_inventory=5000,
-        mkt_open=None,
-        mkt_close=None,
-        use_ofi=True,
-        use_hedge=False,
-        use_kill_switch=False,
-        eta_ofi=0.5,
-    ):
+        id: int,
+        name: str,
+        type: str,
+        symbol: str,
+        starting_cash: int,
+        random_state: Optional[np.random.RandomState] = None,
+        log_orders: bool = True,
+        order_size: int = 100,
+        wake_up_freq: str = "1s",
+        gamma: float = 0.1,
+        k: float = 1.5,
+        vol_window: int = 60,
+        min_sigma: float = 1e-4,
+        max_inventory: int = 5000,
+        mkt_open: Optional[pd.Timestamp] = None,
+        mkt_close: Optional[pd.Timestamp] = None,
+        use_ofi: bool = True,
+        use_hedge: bool = False,
+        use_kill_switch: bool = False,
+        eta_ofi: float = 0.5,
+    ) -> None:
         """
         Inicializa o agente Avellaneda-Stoikov com os parâmetros de controle ótimo e flags de ablação.
 
@@ -108,6 +107,10 @@ class AvellanedaStoikovAgent(TradingAgent):
         self.hedge_threshold = 150  # Inventário crítico antes da trava no SPY
         self.hedge_cost_cents = 2  # Custo financeiro simulado do spread (SPY)
         self.kill_switch_sigma2 = 50.0  # Tolerância máxima de variância (entropia)
+
+        # --- GESTÃO ASSÍNCRONA HFT ---
+        # Tracking em tempo constante O(1) de ordens moribundas para evitar Liquidity Dropouts
+        self.cancelling_orders = set()
 
         # --- CACHE MATEMÁTICO (Pré-computação HJB) ---
         # Constant Folding: Resolve operações matemáticas estáticas na inicialização
@@ -197,14 +200,38 @@ class AvellanedaStoikovAgent(TradingAgent):
         except Exception as e:
             self.logEvent("CRASH_RECEIVE", str(e))
 
+    def orderExecuted(self, order):
+        """
+        Callback de Execução de Ordem. Acionado pelo TradingAgent quando a Exchange confirma um trade.
+        Remove o ID da ordem morta da fila de cancelamento assíncrono.
+
+        Args:
+            order (Order): Objeto representando a ordem executada.
+        """
+        super().orderExecuted(order)
+        self.cancelling_orders.discard(order.order_id)
+
+    def orderCancelled(self, order):
+        """
+        Callback de Cancelamento de Ordem. Acionado pelo TradingAgent quando a Exchange confirma o cancelamento.
+        Remove o ID da ordem morta da fila de cancelamento assíncrono.
+
+        Args:
+            order (Order): Objeto representando a ordem cancelada.
+        """
+        super().orderCancelled(order)
+        self.cancelling_orders.discard(order.order_id)
+
     def cancelAllOrders(self):
         """
         Sub-rotina de segurança: Varre o dicionário de ordens ativas e envia mensagens de cancelamento
         para o Exchange Agent. Utilizada no fechamento de mercado e durante a ativação do Kill Switch.
         """
         cancel = self.cancelOrder
+        dead_orders = self.cancelling_orders
         for order in tuple(self.orders.values()):
             cancel(order)
+            dead_orders.add(order.order_id)
 
     def _compute_mid_cents(self):
         """
@@ -275,9 +302,8 @@ class AvellanedaStoikovAgent(TradingAgent):
         # 1. Extração estrita do deque para matriz em C
         vals = np.array(self.mid_history, dtype=np.float64)
 
-        # 2. Operações vetorizadas puras no NumPy
+        # 2. Operações vetorizadas puras no NumPy.
         # A flag type: ignore silencia o falso positivo de overload do Pylance
-        # mantendo a performance vetorizada intacta.
         log_vals = np.log(vals)  # type: ignore
         log_returns = np.diff(log_vals)
 
@@ -416,7 +442,8 @@ class AvellanedaStoikovAgent(TradingAgent):
                 if abs(q_t) >= self.hedge_threshold and not self.is_hedged:
                     self.is_hedged = True
                     cost = abs(q_t) * self.hedge_cost_cents
-                    self.cash -= cost
+                    # Desconto corrigido para alinhar ao TradingAgent oficial do ABIDES
+                    self.holdings["CASH"] -= cost
                     self.logEvent(
                         "HEDGE_ENTER",
                         f"Inventário={q_t}. SPY Hedge ON. Custo=-{cost}c.",
@@ -424,7 +451,8 @@ class AvellanedaStoikovAgent(TradingAgent):
                 elif abs(q_t) < self.hedge_threshold and self.is_hedged:
                     self.is_hedged = False
                     cost = self.hedge_threshold * self.hedge_cost_cents
-                    self.cash -= cost
+                    # Desconto corrigido para alinhar ao TradingAgent oficial do ABIDES
+                    self.holdings["CASH"] -= cost
                     self.logEvent(
                         "HEDGE_EXIT",
                         f"Inventário={q_t}. SPY Hedge OFF. Custo=-{cost}c.",
@@ -449,9 +477,10 @@ class AvellanedaStoikovAgent(TradingAgent):
         """
         Mecanismo de Reconciliação do Livro do Agente (Order Router).
 
-        Otimização HFT (Single-Pass Scan): Ao invés de usar múltiplos 'list comprehensions'
-        de complexidade O(K*N), varre a tabela de hash de ordens ativas apenas uma vez no nível
-        da C API do Python. Executa cancelamento e checagem de presença simultaneamente.
+        Otimização HFT (Single-Pass Scan): Varre a tabela de hash de ordens ativas apenas
+        uma vez no nível da C API do Python.
+        Blindagem Assíncrona: Adiciona checagem contra 'cancelling_orders' para impedir que
+        ordens em processo de cancelamento causem falsos positivos e Liquidity Dropouts.
 
         Args:
             bid_cents (int): Novo limite desejado de compra (Bid) ancorado ao grid.
@@ -463,10 +492,12 @@ class AvellanedaStoikovAgent(TradingAgent):
         # Cache local de ponteiros (Evita lookup de hash no dicionário interno a cada iteração)
         cancel = self.cancelOrder
         sym = self.symbol
+        dead_orders = self.cancelling_orders
 
         # Varredura Única (O(N)) iterando diretamente sobre os valores
         for o in tuple(self.orders.values()):
-            if o.symbol != sym:
+            # Se não for do ativo ou a ordem já estiver sinalizada para morrer via rede
+            if o.symbol != sym or o.order_id in dead_orders:
                 continue
 
             is_buy = getattr(o, "is_buy_order", False)
@@ -474,11 +505,13 @@ class AvellanedaStoikovAgent(TradingAgent):
             if is_buy:
                 if o.limit_price != bid_cents:
                     cancel(o)
+                    dead_orders.add(o.order_id)
                 else:
                     has_bid = True
             else:
                 if o.limit_price != ask_cents:
                     cancel(o)
+                    dead_orders.add(o.order_id)
                 else:
                     has_ask = True
 
