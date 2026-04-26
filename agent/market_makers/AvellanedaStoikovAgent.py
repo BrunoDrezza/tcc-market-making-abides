@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 import math
 from typing import Dict, Union
+from collections import deque
+
 from agent.TradingAgent import TradingAgent
 
 
@@ -36,7 +38,6 @@ class AvellanedaStoikovAgent(TradingAgent):
         vol_window=60,
         min_sigma=1e-4,
         max_inventory=5000,
-        # horizon_end=None,
         mkt_open=None,
         mkt_close=None,
         use_ofi=True,
@@ -62,7 +63,6 @@ class AvellanedaStoikovAgent(TradingAgent):
             vol_window (int, optional): Janela contínua para estimação da variância (sigma^2).
             min_sigma (float, optional): Piso de segurança para a volatilidade, evitando divisões por zero.
             max_inventory (int, optional): Limite de posição máxima (risk limit). Ao atingir, suspende ordens de agravamento.
-            horizon_end (pd.Timestamp, optional): Tempo final (T) do pregão para o cálculo de (T-t).
             mkt_open (pd.Timestamp, optional): Horário de abertura da simulação.
             mkt_close (pd.Timestamp, optional): Horário de fechamento da simulação.
 
@@ -93,19 +93,30 @@ class AvellanedaStoikovAgent(TradingAgent):
         self.horizon_end = mkt_close
         self.price_scale = 100.0
         self.tick_size = 1
-        self.mid_history = pd.Series(dtype="float64")
-        # Onde estava self.last_quotes = {"mid": None}
+
+        # Estrutura de memória de tempo constante O(1) para alta frequência
+        self.mid_history = deque(maxlen=10 * self.vol_window)
+
         self.last_quotes: Dict[str, Union[int, None]] = {"mid": None}
-        self.use_obi = use_ofi  # Renomeado
+        self.use_obi = use_ofi
         self.use_hedge = use_hedge
         self.use_kill_switch = use_kill_switch
-        self.eta_obi = eta_ofi  # Renomeado
-        self.obi_proxy = 0.0  # Renomeado
+        self.eta_obi = eta_ofi
+        self.obi_proxy = 0.0
 
         self.is_hedged = False  # Estado inicial do derivativo
         self.hedge_threshold = 150  # Inventário crítico antes da trava no SPY
         self.hedge_cost_cents = 2  # Custo financeiro simulado do spread (SPY)
         self.kill_switch_sigma2 = 50.0  # Tolerância máxima de variância (entropia)
+
+        # --- CACHE MATEMÁTICO (Pré-computação HJB) ---
+        # Constant Folding: Resolve operações matemáticas estáticas na inicialização
+        # do agente para evitar recálculos desnecessários no hot path do event loop.
+        self._gamma_safe = max(self.gamma, 1e-12)
+        self._k_safe = max(self.k, 1e-12)
+        self._hjb_constant = (1.0 / self._gamma_safe) * math.log1p(
+            self._gamma_safe / self._k_safe
+        )
 
     def getWakeFrequency(self):
         """
@@ -191,8 +202,9 @@ class AvellanedaStoikovAgent(TradingAgent):
         Sub-rotina de segurança: Varre o dicionário de ordens ativas e envia mensagens de cancelamento
         para o Exchange Agent. Utilizada no fechamento de mercado e durante a ativação do Kill Switch.
         """
-        for order in list(self.orders.values()):
-            self.cancelOrder(order)
+        cancel = self.cancelOrder
+        for order in tuple(self.orders.values()):
+            cancel(order)
 
     def _compute_mid_cents(self):
         """
@@ -234,56 +246,49 @@ class AvellanedaStoikovAgent(TradingAgent):
 
     def _update_mid_history(self, currentTime, mid_cents):
         """
-        Atualiza a série temporal em memória com o logaritmo dos preços para cálculo de volatilidade.
+        Atualiza a série temporal em memória com o preço atual para cálculo de volatilidade.
+
+        Otimização HFT: Substitui a concatenação imutável do Pandas (O(N)) por uma
+        Double-Ended Queue (deque) nativa em C, garantindo inserção e descarte de
+        dados defasados em tempo constante O(1).
 
         Args:
-            currentTime (pd.Timestamp): O instante de tempo atual.
+            currentTime (pd.Timestamp): O instante de tempo atual (Não utilizado ativamente no deque).
             mid_cents (int): O mid-price atual em centavos.
         """
-        mid_dollars = mid_cents / self.price_scale
-        self.mid_history = pd.concat(
-            [self.mid_history, pd.Series([mid_dollars], index=[currentTime])]
-        )
-        max_len = 10 * self.vol_window
-        if len(self.mid_history) > max_len:
-            self.mid_history = self.mid_history.iloc[-max_len:]
+        self.mid_history.append(mid_cents / self.price_scale)
 
     def _estimate_sigma2(self):
         """
         Estima a variância instantânea (sigma^2) do ativo com base em retornos logarítmicos.
 
-        Esta função foi otimizada para microestrutura usando arrays C-contíguos do NumPy
-        para evitar o overhead de indexação do Pandas em simulações de alta frequência.
+        Esta função foi reescrita para remover o overhead completo do interpretador Python e
+        do Pandas no hot path. Extrai os dados do deque diretamente para um ndarray C-contíguo.
 
         Returns:
             float: A variância (sigma^2) estrita e limitada a um piso (min_sigma^2) para evitar
                    indeterminações matemáticas na equação HJB.
         """
-        series = self.mid_history.dropna()
-        if len(series) < 5:
+        if len(self.mid_history) < 5:
             return self.min_sigma**2
 
-        # 1. Extração direta para matriz C-contígua (zero overhead de índice do Pandas)
-        vals = series.to_numpy(dtype=np.float64)
+        # 1. Extração estrita do deque para matriz em C
+        vals = np.array(self.mid_history, dtype=np.float64)
 
-        # 2. Vetorização pura. A flag '# type: ignore' silencia a alucinação do Pylance
-        # garantindo que não sacrificamos milissegundos por causa do linter.
+        # 2. Operações vetorizadas puras no NumPy
+        # A flag type: ignore silencia o falso positivo de overload do Pylance
+        # mantendo a performance vetorizada intacta.
         log_vals = np.log(vals)  # type: ignore
-
-        # 3. Diferença vetorizada (equivalente a .diff().dropna() do Pandas, mas muito mais rápido)
         log_returns = np.diff(log_vals)
 
-        # 4. MICRO-OTIMIZAÇÃO: Fatiamos apenas a última janela necessária em vez de
-        # processar a série histórica inteira.
+        # 3. Fatiamento estrito da última janela válida
         window = log_returns[-self.vol_window :]
 
         if len(window) < 2:
             return self.min_sigma**2
 
-        # Cálculo estrito em C
+        # Cálculo de Desvio Padrão Amostral (ddof=1)
         sigma = float(np.std(window, ddof=1))
-
-        import math
 
         if math.isnan(sigma) or sigma < self.min_sigma:
             sigma = self.min_sigma
@@ -315,32 +320,37 @@ class AvellanedaStoikovAgent(TradingAgent):
         Motor de Precificação Estocástica (Hamilton-Jacobi-Bellman).
 
         Calcula o preço de reserva (r_t) e o meio-spread ótimo (delta) integrando a
-        solução clássica de Avellaneda & Stoikov com preditores informacionais de curtíssimo prazo.
+        solução clássica de Avellaneda & Stoikov com o preditor informacional (OBI).
+
+        Otimização HFT (Constant Folding): Subtrai divisões e logaritmos complexos do
+        ciclo tick-a-tick, utilizando variáveis estáticas pré-computadas na alocação da classe.
 
         Math:
             r_t = S_t - (q_t * gamma * sigma^2 * tau) + (eta * OBI)
-            delta = (gamma * sigma^2 * tau / 2) + (1 / gamma) * ln(1 + gamma/k)
+            delta = (gamma * sigma^2 * tau / 2) + HJB_Constant
 
         Args:
-            mid (float): Mid-price atual do mercado.
-            q_t (int): Inventário atual do agente.
-            sigma2 (float): Variância estocástica atual.
-            tau (float): Fração de tempo remanescente.
-            obi (float): Order Book Imbalance (Sinal de Drift).
+            mid (float): Mid-price atual do mercado em dólares.
+            q_t (int): Inventário direcional atual do agente.
+            sigma2 (float): Variância estocástica atual estimada do micro-preço.
+            tau (float): Fração de tempo remanescente normalizada [1, 0].
+            obi (float): Sinal de Drift de microestrutura.
 
         Returns:
             tuple(float, float): Preço de reserva (r_t) e o spread ótimo contínuo (delta).
         """
-        gamma = max(self.gamma, 1e-12)
-        k = max(self.k, 1e-12)
+        # Termo de aversão a risco ponderado pelo inventário
+        term_1 = q_t * self._gamma_safe * sigma2 * tau
 
         # --- MATEMÁTICA: R_t Clássico vs R_t com Preditor OBI ---
         if self.use_obi:
-            r_t = mid - (q_t * gamma * sigma2 * tau) + (self.eta_obi * obi)
+            r_t = mid - term_1 + (self.eta_obi * obi)
         else:
-            r_t = mid - (q_t * gamma * sigma2 * tau)
+            r_t = mid - term_1
 
-        delta = (gamma * sigma2 * tau / 2.0) + ((1.0 / gamma) * math.log1p(gamma / k))
+        # Cálculo do spread ótimo utilizando a constante pré-computada
+        delta = (self._gamma_safe * sigma2 * tau / 2.0) + self._hjb_constant
+
         return r_t, max(delta, self.tick_size / self.price_scale)
 
     def _quotes_to_cents(self, r_t, delta, q_t):
@@ -439,43 +449,44 @@ class AvellanedaStoikovAgent(TradingAgent):
         """
         Mecanismo de Reconciliação do Livro do Agente (Order Router).
 
-        Varre as ordens abertas enviadas pelo agente e as compara com os novos limites ótimos
-        (bid_cents, ask_cents). Cancela passivamente as ordens obsoletas e insere liquidez nos
-        novos níveis calculados pelo controle estocástico, sujeitando-se às travas de inventário.
+        Otimização HFT (Single-Pass Scan): Ao invés de usar múltiplos 'list comprehensions'
+        de complexidade O(K*N), varre a tabela de hash de ordens ativas apenas uma vez no nível
+        da C API do Python. Executa cancelamento e checagem de presença simultaneamente.
 
         Args:
-            bid_cents (int): Novo limite desejado de compra (Bid).
-            ask_cents (int): Novo limite desejado de venda (Ask).
+            bid_cents (int): Novo limite desejado de compra (Bid) ancorado ao grid.
+            ask_cents (int): Novo limite desejado de venda (Ask) ancorado ao grid.
         """
-        open_orders = list(self.orders.values())
+        has_bid = False
+        has_ask = False
 
-        # Correção agressiva anti-crash nas ordens
-        bid_orders = [
-            o
-            for o in open_orders
-            if getattr(o, "is_buy_order", False) and o.symbol == self.symbol
-        ]
-        ask_orders = [
-            o
-            for o in open_orders
-            if not getattr(o, "is_buy_order", True) and o.symbol == self.symbol
-        ]
+        # Cache local de ponteiros (Evita lookup de hash no dicionário interno a cada iteração)
+        cancel = self.cancelOrder
+        sym = self.symbol
 
-        for o in bid_orders:
-            if o.limit_price != bid_cents:
-                self.cancelOrder(o)
+        # Varredura Única (O(N)) iterando diretamente sobre os valores
+        for o in tuple(self.orders.values()):
+            if o.symbol != sym:
+                continue
 
-        for o in ask_orders:
-            if o.limit_price != ask_cents:
-                self.cancelOrder(o)
+            is_buy = getattr(o, "is_buy_order", False)
 
-        has_bid = any(o.limit_price == bid_cents for o in bid_orders)
-        has_ask = any(o.limit_price == ask_cents for o in ask_orders)
+            if is_buy:
+                if o.limit_price != bid_cents:
+                    cancel(o)
+                else:
+                    has_bid = True
+            else:
+                if o.limit_price != ask_cents:
+                    cancel(o)
+                else:
+                    has_ask = True
 
-        inv = self.getHoldings(self.symbol)
+        inv = self.getHoldings(sym)
 
+        # Reposição de liquidez limitando posições extremas
         if not has_bid and inv < self.max_inventory:
-            self.placeLimitOrder(self.symbol, self.order_size, True, bid_cents)
+            self.placeLimitOrder(sym, self.order_size, True, bid_cents)
 
         if not has_ask and inv > -self.max_inventory:
-            self.placeLimitOrder(self.symbol, self.order_size, False, ask_cents)
+            self.placeLimitOrder(sym, self.order_size, False, ask_cents)
