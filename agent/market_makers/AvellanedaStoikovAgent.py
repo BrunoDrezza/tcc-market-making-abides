@@ -1,14 +1,14 @@
 import math
 import numpy as np
 import pandas as pd
-from typing import Dict, Union, Optional
+from typing import Dict, Union, Optional, Any, Tuple
 from collections import deque
 from agent.TradingAgent import TradingAgent
 
 
 class AvellanedaStoikovAgent(TradingAgent):
     """
-    Agente Formador de Mercado baseado no modelo de controle estocástico de Avellaneda & Stoikov (2008).
+    Agente Formador de Mercado baseado no modelo de controlo estocástico de Avellaneda & Stoikov (2008).
 
     Esta implementação estende o arcabouço original incorporando três camadas de defesa empírica
     para atuar em microestruturas de Limit Order Book (LOB) de alta frequência sob estresse direcional:
@@ -45,16 +45,16 @@ class AvellanedaStoikovAgent(TradingAgent):
         eta_ofi: float = 0.5,
     ) -> None:
         """
-        Inicializa o agente Avellaneda-Stoikov com os parâmetros de controle ótimo e flags de ablação.
+        Inicializa o agente Avellaneda-Stoikov com os parâmetros de controlo ótimo e flags de ablação.
 
         Args:
             id (int): Identificador único do agente no kernel do ABIDES.
-            name (str): Nome de registro do agente.
+            name (str): Nome de registo do agente.
             type (str): Tipo de classe do agente (usado para métricas e logs).
             symbol (str): Ticker do ativo provido (ex: 'AAPL').
-            starting_cash (int): Caixa inicial em centavos.
+            starting_cash (int): Caixa inicial em cêntimos.
             random_state (np.random.RandomState, optional): Semente estocástica local.
-            log_orders (bool, optional): Flag para registro de envio/cancelamento de ordens.
+            log_orders (bool, optional): Flag para registo de envio/cancelamento de ordens.
             order_size (int, optional): Tamanho do lote padrão por cotação (bid/ask).
             wake_up_freq (str, optional): Frequência do loop de decisão (ex: '1s', '10ms').
             gamma (float, optional): Coeficiente de aversão ao risco absoluto (CARA). Define a penalização do inventário.
@@ -121,7 +121,10 @@ class AvellanedaStoikovAgent(TradingAgent):
             self._gamma_safe / self._k_safe
         )
 
-    def getWakeFrequency(self):
+        # State Lock (Semáforo) para evitar estrangulamento da rede no ABIDES
+        self.state = "AWAITING_WAKEUP"
+
+    def getWakeFrequency(self) -> pd.Timedelta:
         """
         Retorna a frequência de despertar do agente no formato de Timedelta do Pandas.
 
@@ -130,28 +133,70 @@ class AvellanedaStoikovAgent(TradingAgent):
         """
         return pd.Timedelta(self.wake_up_freq)
 
-    def kernelStarting(self, startTime):
+    def kernelStarting(self, startTime: pd.Timestamp) -> None:
         """
         Gatilho de inicialização disparado pelo Kernel do ABIDES antes do início do loop principal.
 
-        Configura o primeiro despertar do agente. Se houver um horário de abertura de mercado
-        definido (mkt_open), o agente agenda seu primeiro 'wakeup' para esse instante.
+        Configura o primeiro despertar do agente e simula o atraso de processamento em hardware (HFT).
 
         Args:
             startTime (pd.Timestamp): O tempo global inicial da simulação.
         """
         super().kernelStarting(startTime)
+
+        # --- REALISMO DE HARDWARE (COMPUTATION DELAY) ---
+        # Simula o tempo de processamento das equações diferenciais (HJB) no silício.
+        # Definido para 10 microssegundos (10.000 nanosegundos).
+        self.setComputationDelay(10000)
+
         if self.mkt_open is not None:
             self.setWakeup(self.mkt_open)
         else:
             self.setWakeup(startTime + pd.Timedelta(self.wake_up_freq))
 
-    def wakeup(self, currentTime):
+    def kernelStopping(self) -> None:
+        """
+        Gatilho de encerramento da simulação.
+
+        Otimização Quantitativa: Faz override da função nativa do TradingAgent para
+        forçar o Mark-to-Market (MtM) a utilizar o Mid-Price (use_midpoint=True).
+        Isso elimina o 'Bid-Ask Bounce' (ruído de microestrutura) do cálculo do PnL,
+        garantindo que o Ablation Study avalie a performance do inventário a preço justo.
+        """
+        # Chama apenas o kernelStopping da superclasse para não duplicar logs
+        super().kernelStopping()
+
+        self.logEvent("FINAL_HOLDINGS", self.fmtHoldings(self.holdings))
+        # Converte int para str para satisfazer a inferência de tipo nativa do Agent.py
+        self.logEvent("FINAL_CASH_POSITION", str(self.holdings["CASH"]), True)
+
+        # --- CORREÇÃO CRÍTICA DE PNL ---
+        # Avalia as ações pelo Mid-Price em vez do Last-Trade Price
+        cash = self.markToMarket(self.holdings, use_midpoint=True)
+
+        # Converte para str para satisfazer o Pylance
+        self.logEvent("ENDING_CASH", str(cash), True)
+
+        mytype = self.type
+        gain = cash - self.starting_cash
+
+        # Type Guard: Garante ao Pylance que o kernel já foi instanciado nesta fase do ciclo de vida
+        if self.kernel is not None:
+            if mytype in self.kernel.meanResultByAgentType:
+                self.kernel.meanResultByAgentType[mytype] += gain
+                self.kernel.agentCountByType[mytype] += 1
+            else:
+                self.kernel.meanResultByAgentType[mytype] = gain
+                self.kernel.agentCountByType[mytype] = 1
+
+    def wakeup(self, currentTime: pd.Timestamp) -> None:
         """
         Ponto de entrada do relógio de simulação (Kernel Event Loop).
 
         Desperta o agente de acordo com a frequência (wake_up_freq). Durante o horário regular de mercado,
         dispara a requisição de top-of-book (Spread) para a Exchange, o que iniciará o processo de precificação.
+        Utiliza um semáforo de estado (State Lock) para evitar o estrangulamento da fila de mensagens
+        da rede devido à assincronicidade e latência.
 
         Args:
             currentTime (pd.Timestamp): O instante de tempo atual fornecido pelo Global Virtual Time do ABIDES.
@@ -175,54 +220,58 @@ class AvellanedaStoikovAgent(TradingAgent):
                 self.cancelAllOrders()
                 return
 
-            # Mercado Aberto: Solicita o spread e agenda o próximo segundo
+            # Mercado Aberto: Solicita o spread e trava o estado para evitar SPAM na rede
             self.setWakeup(currentTime + self.getWakeFrequency())
-            self.getCurrentSpread(self.symbol, depth=1)
+            if self.state == "AWAITING_WAKEUP":
+                self.state = "AWAITING_SPREAD"
+                self.getCurrentSpread(self.symbol, depth=1)
 
         except Exception as e:
             self.logEvent("CRASH_WAKEUP", str(e))
 
-    def receiveMessage(self, currentTime, msg):
+    def receiveMessage(self, currentTime: pd.Timestamp, msg: Any) -> None:
         """
         Processador de mensagens de rede do agente (Callback).
 
         Responde a eventos recebidos via rede simulada (com latência contabilizada). O principal gatilho
-        ocorre quando a Exchange responde com os dados do 'QUERY_SPREAD', iniciando a recalibração de cotações.
+        ocorre quando a Exchange responde com os dados do 'QUERY_SPREAD'. Ao receber a resposta,
+        libera o semáforo de rede e inicia a orquestração de recotação via HJB.
 
         Args:
             currentTime (pd.Timestamp): O instante de chegada da mensagem após o atraso de rede (latency).
-            msg (Message): Objeto de mensagem serializado pelo ABIDES.
+            msg (Any): Objeto de mensagem serializado pelo ABIDES.
         """
         try:
             super().receiveMessage(currentTime, msg)
             if msg.body["msg"] == "QUERY_SPREAD":
+                self.state = "AWAITING_WAKEUP"  # Libera o semáforo de rede
                 self._update_quotes(currentTime)
         except Exception as e:
             self.logEvent("CRASH_RECEIVE", str(e))
 
-    def orderExecuted(self, order):
+    def orderExecuted(self, order: Any) -> None:
         """
         Callback de Execução de Ordem. Acionado pelo TradingAgent quando a Exchange confirma um trade.
         Remove o ID da ordem morta da fila de cancelamento assíncrono.
 
         Args:
-            order (Order): Objeto representando a ordem executada.
+            order (Any): Objeto representando a ordem executada.
         """
         super().orderExecuted(order)
         self.cancelling_orders.discard(order.order_id)
 
-    def orderCancelled(self, order):
+    def orderCancelled(self, order: Any) -> None:
         """
         Callback de Cancelamento de Ordem. Acionado pelo TradingAgent quando a Exchange confirma o cancelamento.
         Remove o ID da ordem morta da fila de cancelamento assíncrono.
 
         Args:
-            order (Order): Objeto representando a ordem cancelada.
+            order (Any): Objeto representando a ordem cancelada.
         """
         super().orderCancelled(order)
         self.cancelling_orders.discard(order.order_id)
 
-    def cancelAllOrders(self):
+    def cancelAllOrders(self) -> None:
         """
         Sub-rotina de segurança: Varre o dicionário de ordens ativas e envia mensagens de cancelamento
         para o Exchange Agent. Utilizada no fechamento de mercado e durante a ativação do Kill Switch.
@@ -233,7 +282,7 @@ class AvellanedaStoikovAgent(TradingAgent):
             cancel(order)
             dead_orders.add(order.order_id)
 
-    def _compute_mid_cents(self):
+    def _compute_mid_cents(self) -> int:
         """
         Processa o estado atual do Limit Order Book e calcula o sinal de microestrutura (OBI).
 
@@ -244,7 +293,7 @@ class AvellanedaStoikovAgent(TradingAgent):
             OBI = (V_bid - V_ask) / (V_bid + V_ask)
 
         Returns:
-            int: O preço médio (mid-price) do ativo em centavos.
+            int: O preço médio (mid-price) do ativo em cêntimos.
         """
         res = self.getKnownBidAsk(self.symbol)
 
@@ -265,13 +314,17 @@ class AvellanedaStoikovAgent(TradingAgent):
             mid = int(round((bid + ask) / 2))
             self.last_quotes["mid"] = mid
             return mid
-        elif self.last_quotes.get("mid") is not None:
-            return self.last_quotes["mid"]
-        else:
-            self.last_quotes["mid"] = 100000
-            return 100000
 
-    def _update_mid_history(self, currentTime, mid_cents):
+        # Type Narrowing explícito: extrai o valor para uma variável local antes
+        # para que o Pylance possa garantir que não é None ao converter para int.
+        last_mid = self.last_quotes.get("mid")
+        if last_mid is not None:
+            return int(last_mid)
+
+        self.last_quotes["mid"] = 100000
+        return 100000
+
+    def _update_mid_history(self, currentTime: pd.Timestamp, mid_cents: int) -> None:
         """
         Atualiza a série temporal em memória com o preço atual para cálculo de volatilidade.
 
@@ -280,12 +333,12 @@ class AvellanedaStoikovAgent(TradingAgent):
         dados defasados em tempo constante O(1).
 
         Args:
-            currentTime (pd.Timestamp): O instante de tempo atual (Não utilizado ativamente no deque).
-            mid_cents (int): O mid-price atual em centavos.
+            currentTime (pd.Timestamp): O instante de tempo atual.
+            mid_cents (int): O mid-price atual em cêntimos.
         """
         self.mid_history.append(mid_cents / self.price_scale)
 
-    def _estimate_sigma2(self):
+    def _estimate_sigma2(self) -> float:
         """
         Estima a variância instantânea (sigma^2) do ativo com base em retornos logarítmicos.
 
@@ -297,7 +350,7 @@ class AvellanedaStoikovAgent(TradingAgent):
                    indeterminações matemáticas na equação HJB.
         """
         if len(self.mid_history) < 5:
-            return self.min_sigma**2
+            return float(self.min_sigma**2)
 
         # 1. Extração estrita do deque para matriz em C
         vals = np.array(self.mid_history, dtype=np.float64)
@@ -311,7 +364,7 @@ class AvellanedaStoikovAgent(TradingAgent):
         window = log_returns[-self.vol_window :]
 
         if len(window) < 2:
-            return self.min_sigma**2
+            return float(self.min_sigma**2)
 
         # Cálculo de Desvio Padrão Amostral (ddof=1)
         sigma = float(np.std(window, ddof=1))
@@ -319,9 +372,9 @@ class AvellanedaStoikovAgent(TradingAgent):
         if math.isnan(sigma) or sigma < self.min_sigma:
             sigma = self.min_sigma
 
-        return sigma * sigma
+        return float(sigma * sigma)
 
-    def _remaining_horizon_fraction(self, currentTime):
+    def _remaining_horizon_fraction(self, currentTime: pd.Timestamp) -> float:
         """
         Calcula a fração de tempo remanescente até o final do pregão (tau).
 
@@ -339,9 +392,11 @@ class AvellanedaStoikovAgent(TradingAgent):
         remaining = (self.horizon_end - currentTime).total_seconds()
         if total <= 0:
             return 0.0
-        return max(0.0, min(1.0, remaining / total))
+        return float(max(0.0, min(1.0, remaining / total)))
 
-    def _avellaneda_stoikov(self, mid, q_t, sigma2, tau, obi):
+    def _avellaneda_stoikov(
+        self, mid: float, q_t: int, sigma2: float, tau: float, obi: float
+    ) -> Tuple[float, float]:
         """
         Motor de Precificação Estocástica (Hamilton-Jacobi-Bellman).
 
@@ -363,7 +418,7 @@ class AvellanedaStoikovAgent(TradingAgent):
             obi (float): Sinal de Drift de microestrutura.
 
         Returns:
-            tuple(float, float): Preço de reserva (r_t) e o spread ótimo contínuo (delta).
+            Tuple[float, float]: Preço de reserva (r_t) e o spread ótimo contínuo (delta).
         """
         # Termo de aversão a risco ponderado pelo inventário
         term_1 = q_t * self._gamma_safe * sigma2 * tau
@@ -377,9 +432,9 @@ class AvellanedaStoikovAgent(TradingAgent):
         # Cálculo do spread ótimo utilizando a constante pré-computada
         delta = (self._gamma_safe * sigma2 * tau / 2.0) + self._hjb_constant
 
-        return r_t, max(delta, self.tick_size / self.price_scale)
+        return float(r_t), float(max(delta, self.tick_size / self.price_scale))
 
-    def _quotes_to_cents(self, r_t, delta, q_t):
+    def _quotes_to_cents(self, r_t: float, delta: float, q_t: int) -> Tuple[int, int]:
         """
         Discretiza as cotações teóricas do espaço contínuo para o grid de mercado (Tick Size).
 
@@ -392,7 +447,7 @@ class AvellanedaStoikovAgent(TradingAgent):
             q_t (int): Inventário atual.
 
         Returns:
-            tuple(int, int): Preços de Bid e Ask determinísticos em centavos.
+            Tuple[int, int]: Preços de Bid e Ask determinísticos em cêntimos.
         """
         bid = int(math.floor((r_t - delta) * self.price_scale))
         ask = int(math.ceil((r_t + delta) * self.price_scale))
@@ -406,7 +461,7 @@ class AvellanedaStoikovAgent(TradingAgent):
 
         return bid, ask
 
-    def _update_quotes(self, currentTime):
+    def _update_quotes(self, currentTime: pd.Timestamp) -> None:
         """
         Orquestrador Central da Estratégia de Market Making.
 
@@ -435,7 +490,7 @@ class AvellanedaStoikovAgent(TradingAgent):
                 )
                 return
 
-            q_t = self.getHoldings(self.symbol)
+            q_t = int(self.getHoldings(self.symbol))
 
             # --- LAYER 2: HEDGE SINTÉTICO NO SPY ---
             if self.use_hedge:
@@ -459,10 +514,12 @@ class AvellanedaStoikovAgent(TradingAgent):
                     )
 
             tau = self._remaining_horizon_fraction(currentTime)
-            mid = mid_cents / self.price_scale
+            mid = float(mid_cents / self.price_scale)
 
             # Usa o obi_proxy atualizado
-            r_t, delta = self._avellaneda_stoikov(mid, q_t, sigma2, tau, self.obi_proxy)
+            r_t, delta = self._avellaneda_stoikov(
+                mid, q_t, sigma2, tau, float(self.obi_proxy)
+            )
             bid_cents, ask_cents = self._quotes_to_cents(r_t, delta, q_t)
 
             self._reprice_quotes(bid_cents, ask_cents)
@@ -473,7 +530,7 @@ class AvellanedaStoikovAgent(TradingAgent):
         except Exception as e:
             self.logEvent("CRASH_UPDATE", str(e))
 
-    def _reprice_quotes(self, bid_cents, ask_cents):
+    def _reprice_quotes(self, bid_cents: int, ask_cents: int) -> None:
         """
         Mecanismo de Reconciliação do Livro do Agente (Order Router).
 
@@ -515,7 +572,7 @@ class AvellanedaStoikovAgent(TradingAgent):
                 else:
                     has_ask = True
 
-        inv = self.getHoldings(sym)
+        inv = int(self.getHoldings(sym))
 
         # Reposição de liquidez limitando posições extremas
         if not has_bid and inv < self.max_inventory:
