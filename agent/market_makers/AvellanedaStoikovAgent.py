@@ -39,7 +39,7 @@ class AvellanedaStoikovAgent(TradingAgent):
         max_inventory: int = 5000,
         mkt_open: Optional[pd.Timestamp] = None,
         mkt_close: Optional[pd.Timestamp] = None,
-        use_ofi: bool = True,
+        use_obi: bool = True,
         use_hedge: bool = False,
         use_kill_switch: bool = False,
         eta_ofi: float = 0.5,
@@ -97,7 +97,7 @@ class AvellanedaStoikovAgent(TradingAgent):
         self.mid_history = deque(maxlen=10 * self.vol_window)
 
         self.last_quotes: Dict[str, Union[int, None]] = {"mid": None}
-        self.use_obi = use_ofi
+        self.use_obi = use_obi
         self.use_hedge = use_hedge
         self.use_kill_switch = use_kill_switch
         self.eta_obi = eta_ofi
@@ -524,7 +524,7 @@ class AvellanedaStoikovAgent(TradingAgent):
 
             self._reprice_quotes(bid_cents, ask_cents)
 
-            log_str = f"inv={q_t} mid={mid_cents} bid={bid_cents} ask={ask_cents} obi={self.obi_proxy:.2f}"
+            log_str = f"inv={q_t} mid={mid_cents} bid={bid_cents} ask={ask_cents} obi={self.obi_proxy:.2f} cash={self.holdings['CASH']}"
             self.logEvent("AS_QUOTE", log_str)
 
         except Exception as e:
