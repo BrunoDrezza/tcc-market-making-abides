@@ -106,6 +106,10 @@ class AvellanedaStoikovAgent(TradingAgent):
         self.is_hedged = False  # Estado inicial do derivativo
         self.hedge_threshold = 150  # Inventário crítico antes da trava no SPY
         self.hedge_cost_cents = 2  # Custo financeiro simulado do spread (SPY)
+        # --- NOVAS VARIÁVEIS DE HEDGE CONTÍNUO ---
+        self.hedge_qty = 0      # Quantidade retida do ETF
+        self.hedge_cash = 0.0   # Fluxo de caixa exclusivo das operações do ETF
+
         self.kill_switch_sigma2 = 50.0  # Tolerância máxima de variância (entropia)
 
         # --- GESTÃO ASSÍNCRONA HFT ---
@@ -165,8 +169,20 @@ class AvellanedaStoikovAgent(TradingAgent):
         """
         # Chama apenas o kernelStopping da superclasse para não duplicar logs
         super().kernelStopping()
+        
+        # LIQUIDAÇÃO FINAL DO HEDGE (Vende todo o ETF a mercado)
+        if self.use_hedge and self.hedge_qty != 0:
+            # Extração segura e tipada para evitar o NoneType
+            raw_mid = self.last_quotes.get("mid")
+            final_mid = int(raw_mid) if raw_mid is not None else 100000
+            
+            # Envelopa o cálculo em int() para bater com a tipagem de holdings["CASH"]
+            cash_adjustment = int(self.hedge_cash + (self.hedge_qty * final_mid))
+            self.holdings["CASH"] += cash_adjustment
+            self.hedge_qty = 0
 
         self.logEvent("FINAL_HOLDINGS", self.fmtHoldings(self.holdings))
+        
         # Converte int para str para satisfazer a inferência de tipo nativa do Agent.py
         self.logEvent("FINAL_CASH_POSITION", str(self.holdings["CASH"]), True)
 
@@ -492,39 +508,47 @@ class AvellanedaStoikovAgent(TradingAgent):
 
             q_t = int(self.getHoldings(self.symbol))
 
-            # --- LAYER 2: HEDGE SINTÉTICO NO SPY ---
+            # --- LAYER 2: HEDGE CONTÍNUO DE CAUDA (EXCESS INVENTORY) ---
             if self.use_hedge:
-                if abs(q_t) >= self.hedge_threshold and not self.is_hedged:
-                    self.is_hedged = True
-                    cost = abs(q_t) * self.hedge_cost_cents
-                    # Desconto corrigido para alinhar ao TradingAgent oficial do ABIDES
-                    self.holdings["CASH"] -= cost
-                    self.logEvent(
-                        "HEDGE_ENTER",
-                        f"Inventário={q_t}. SPY Hedge ON. Custo=-{cost}c.",
-                    )
-                elif abs(q_t) < self.hedge_threshold and self.is_hedged:
-                    self.is_hedged = False
-                    cost = self.hedge_threshold * self.hedge_cost_cents
-                    # Desconto corrigido para alinhar ao TradingAgent oficial do ABIDES
-                    self.holdings["CASH"] -= cost
-                    self.logEvent(
-                        "HEDGE_EXIT",
-                        f"Inventário={q_t}. SPY Hedge OFF. Custo=-{cost}c.",
-                    )
+                # 1. Determina a quantidade alvo para travar o risco no threshold
+                if q_t > self.hedge_threshold:
+                    target_hedge = -(q_t - self.hedge_threshold)
+                elif q_t < -self.hedge_threshold:
+                    target_hedge = -(q_t + self.hedge_threshold)
+                else:
+                    target_hedge = 0
+
+                # 2. Executa a compra/venda do ETF se houver diferença
+                hedge_diff = target_hedge - self.hedge_qty
+                if hedge_diff != 0:
+                    trade_value = hedge_diff * mid_cents
+                    trade_cost = abs(hedge_diff) * self.hedge_cost_cents
+                    self.hedge_cash -= (trade_value + trade_cost)
+                    self.hedge_qty = target_hedge
+
+                # 3. O Risco Líquido é o inventário real + o hedge.
+                # Isso garante que a equação HJB nunca calcule um risco além de +- 150!
+                net_q = q_t + self.hedge_qty 
+            else:
+                net_q = q_t
 
             tau = self._remaining_horizon_fraction(currentTime)
             mid = float(mid_cents / self.price_scale)
 
-            # Usa o obi_proxy atualizado
+            # --- A EQUAÇÃO AGORA USA O net_q (Risco Hedgado) ---
             r_t, delta = self._avellaneda_stoikov(
-                mid, q_t, sigma2, tau, float(self.obi_proxy)
+                mid, net_q, sigma2, tau, float(self.obi_proxy)
             )
             bid_cents, ask_cents = self._quotes_to_cents(r_t, delta, q_t)
 
             self._reprice_quotes(bid_cents, ask_cents)
 
-            log_str = f"inv={q_t} mid={mid_cents} bid={bid_cents} ask={ask_cents} obi={self.obi_proxy:.2f} cash={self.holdings['CASH']}"
+            if self.use_hedge:
+                virtual_cash = self.holdings["CASH"] + self.hedge_cash + (self.hedge_qty * mid_cents)
+            else:
+                virtual_cash = self.holdings["CASH"]
+
+            log_str = f"inv={q_t} mid={mid_cents} bid={bid_cents} ask={ask_cents} obi={self.obi_proxy:.2f} cash={virtual_cash}"
             self.logEvent("AS_QUOTE", log_str)
 
         except Exception as e:

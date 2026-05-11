@@ -81,7 +81,16 @@ def plot_metrics(sim_dirs, sim_colors, output_dir, ohclv_dict, recompute):
             else: # Pickled simulated metric found in cache.
                 sims = pickle.load(open(pickled_sim, "rb"))
 
-            sim_name = sim_dir.rstrip('/').split("/")[-1]
+            sim_name_raw = sim_dir.rstrip('/').split("/")[-1]
+            
+            
+            name_mapping = {
+                "TCC_Mercado_Puro": "Mercado Base (Controle)",
+                "TCC_Mercado_HFT": "Mercado com Agente A-S"
+            }
+
+            sim_name = name_mapping.get(sim_name_raw, sim_name_raw)
+            
             result.update({(sim_name, sim_colors[i]): sims})
 
         # Create plot for each config and metric
@@ -103,7 +112,7 @@ if __name__ == "__main__":
                              "filenames MUST contain the word 'Exchange' in any case. One can add many simulated data "
                              "directories")
     parser.add_argument('-z', '--recompute', action="store_true", help="Rerun computations without caching.")
-    parser.add_argument('-o', '--output-dir', default='visualizations', help='Path to output directory', type=dir_path)
+    parser.add_argument('-o', '--output-dir', default='realism/visualizations', help='Path to output directory', type=dir_path)
 
     args, remaining_args = parser.parse_known_args()
 

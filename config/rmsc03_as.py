@@ -112,6 +112,8 @@ parser.add_argument(
 parser.add_argument(
     "--use-kill-switch", action="store_true", help="Ativa a Camada 3 (Entropia)"
 )
+parser.add_argument('--gamma', type=float, default=1.0, help='Aversão ao risco do AS')
+parser.add_argument('--k', type=float, default=10.0, help='Sensibilidade de execução do AS')
 
 args, remaining_args = parser.parse_known_args()
 
@@ -342,8 +344,8 @@ agents.extend(
             # ----------------------------------------
             order_size=100,
             wake_up_freq="1s",
-            gamma=0.05,
-            k=100,
+            gamma=args.gamma,
+            k=args.k,
             vol_window=60,
             max_inventory=5000,
             mkt_open=mkt_open,

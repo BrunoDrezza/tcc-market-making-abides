@@ -14,7 +14,7 @@ def load_agent_log(log_dir, agent_name="AVELLANEDA_STOIKOV_AGENT"):
 
 def parse_as_metrics(df, starting_cash=10000000):
     """
-    Extrai as métricas de alta frequência e calcula o PnL Tick-a-Tick.
+    Extrai as métricas de alta frequência e calcula o PnL Tick-a-Tick e Retornos.
     starting_cash padrão: 100.000 USD (10.000.000 centimos).
     """
     print("Parsing AS quote metrics and computing temporal PnL...")
@@ -48,9 +48,16 @@ def parse_as_metrics(df, starting_cash=10000000):
         parsed_df['EventTime'] = pd.to_datetime(parsed_df['EventTime'])
         parsed_df.set_index('EventTime', inplace=True)
         
-    # 6. CÁLCULO DE PNL (MARK-TO-MARKET LIVRE DE VIÉS)
-    # (Cash_Atual - Cash_Inicial)/100 + (Inventário * (MidPrice/100))
+    # 6. CÁLCULO DE PNL (MARK-TO-MARKET LIVRE DE VIÉS) EM DÓLARES
     parsed_df['PnL'] = ((parsed_df['cash'] - starting_cash) / 100.0) + (parsed_df['inv'] * (parsed_df['mid'] / 100.0))
     
-    print(f"Sucesso! {len(parsed_df)} cotações processadas com MtM dinâmico.")
-    return parsed_df[['inv', 'mid', 'bid', 'ask', 'obi', 'cash', 'PnL']]
+    # NOVO: 7. CÁLCULO DA CURVA DE CAPITAL (Equity Curve) E RETORNOS
+    starting_cash_usd = starting_cash / 100.0
+    parsed_df['Equity'] = starting_cash_usd + parsed_df['PnL']
+    
+    # Calcula os retornos contínuos (log returns) da curva de capital para métricas de risco
+    # O Pylance pode reclamar da divisão, mas estamos seguros pois a Equity nunca será <= 0 no ABIDES
+    parsed_df['Returns'] = np.log(parsed_df['Equity'] / parsed_df['Equity'].shift(1)).fillna(0) # type: ignore
+    
+    print(f"Sucesso! {len(parsed_df)} cotações processadas com MtM dinâmico e Retornos.")
+    return parsed_df[['inv', 'mid', 'bid', 'ask', 'obi', 'cash', 'PnL', 'Equity', 'Returns']]

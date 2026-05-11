@@ -1,0 +1,9 @@
+Test_ID,Use_OBI,Use_HEDGE,Use_KILL_SWITCH,Estoque_Maximo_Retido,PnL_Liquido_USD,Retorno_Total_Pct,Status
+1,False,False,False,4873,19870.39,19.8704,OK
+2,False,False,True,5078,-16751.29,-16.7513,OK
+3,False,True,False,1363,-3957.09,-3.9571,OK
+4,False,True,True,5044,-5147.49,-5.1475,OK
+5,True,False,False,3399,6195.13,6.1951,OK
+6,True,False,True,4369,1766.14,1.7661,OK
+7,True,True,False,5039,12107.86,12.1079,OK
+8,True,True,True,4717,10808.36,10.8084,OK
