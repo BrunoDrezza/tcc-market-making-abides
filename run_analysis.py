@@ -7,7 +7,12 @@ import argparse
 import os
 
 from analysis.parser import load_agent_log, parse_as_metrics
-from analysis.metrics import calculate_inventory_stats, print_stats
+from analysis.metrics import (
+    calculate_inventory_stats,
+    calculate_risk_metrics,
+    calculate_sigma2_stats,
+    print_stats,
+)
 from analysis.plotting import plot_inventory_dynamics, plot_pricing_dynamics, plot_spread
 
 
@@ -36,8 +41,12 @@ def main():
     parsed_df = parse_as_metrics(raw_df)
     print(f"  {len(parsed_df)} quote observations extracted.")
 
-    stats = calculate_inventory_stats(parsed_df)
-    print_stats(stats)
+    print_stats(calculate_inventory_stats(parsed_df))
+    print_stats(calculate_risk_metrics(parsed_df))
+
+    # A distribuicao de sigma^2 e a base de calibracao do limiar da camada 3:
+    # o percentil 99 deve ser passado a run_ablation_study.py via --kill-sigma2.
+    print_stats(calculate_sigma2_stats(parsed_df))
 
     print("Generating plots...")
     plot_inventory_dynamics(parsed_df, args.output_dir)
