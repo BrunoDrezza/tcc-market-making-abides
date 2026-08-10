@@ -35,14 +35,18 @@ class AvellanedaStoikovAgent(TradingAgent):
         gamma: float = 0.1,
         k: float = 1.5,
         vol_window: int = 60,
-        min_sigma: float = 1e-4,
+        min_sigma: float = 1e-3,
         max_inventory: int = 5000,
         mkt_open: Optional[pd.Timestamp] = None,
         mkt_close: Optional[pd.Timestamp] = None,
         use_obi: bool = True,
         use_hedge: bool = False,
         use_kill_switch: bool = False,
-        eta_ofi: float = 0.5,
+        eta_obi: float = 0.5,
+        kill_switch_sigma2: float = 1.0e-2,
+        hedge_threshold: int = 150,
+        hedge_cost_cents: int = 2,
+        liquidation_lead: str = "60s",
     ) -> None:
         """
         Inicializa o agente Avellaneda-Stoikov com os parâmetros de controlo ótimo e flags de ablação.
@@ -60,7 +64,10 @@ class AvellanedaStoikovAgent(TradingAgent):
             gamma (float, optional): Coeficiente de aversão ao risco absoluto (CARA). Define a penalização do inventário.
             k (float, optional): Sensibilidade da taxa de execução de ordens em relação à distância do mid-price.
             vol_window (int, optional): Janela contínua para estimação da variância (sigma^2).
-            min_sigma (float, optional): Piso de segurança para a volatilidade, evitando divisões por zero.
+            min_sigma (float, optional): Piso de segurança para a volatilidade, em DÓLARES por
+                intervalo de despertar, evitando divisões por zero. Deve permanecer ao menos uma
+                ordem de grandeza abaixo da volatilidade típica do ativo para não dominar a
+                estimativa; o default de 1e-3 corresponde a um décimo de cêntimo.
             max_inventory (int, optional): Limite de posição máxima (risk limit). Ao atingir, suspende ordens de agravamento.
             mkt_open (pd.Timestamp, optional): Horário de abertura da simulação.
             mkt_close (pd.Timestamp, optional): Horário de fechamento da simulação.
@@ -70,6 +77,18 @@ class AvellanedaStoikovAgent(TradingAgent):
             use_hedge (bool, optional): Se True, ativa a Camada 2: Simula trava de risco no SPY caso o inventário cruze o limite crítico.
             use_kill_switch (bool, optional): Se True, ativa a Camada 3: Cancela todas as ordens se a variância cruzar o limite máximo.
             eta_obi (float, optional): Coeficiente de sensibilidade do sinal de drift (OBI).
+            kill_switch_sigma2 (float, optional): Limiar de variância, em dólares ao quadrado,
+                acima do qual a Camada 3 suspende a provisão de liquidez. Deve ser calibrado
+                sobre a distribuição empírica de sigma^2 de um cenário de referência (e.g. o
+                percentil 99), sob pena de nunca ser atingido ou de disparar continuamente.
+            hedge_threshold (int, optional): Inventário direcional crítico a partir do qual a
+                Camada 2 trava o excedente de risco.
+            hedge_cost_cents (int, optional): Custo de fricção, em cêntimos por ação, debitado
+                a cada rebalanceamento da posição sintética de proteção.
+            liquidation_lead (str, optional): Antecedência, em relação ao fim do horizonte, com
+                que o agente suspende a provisão de liquidez passiva e passa a desfazer o
+                inventário residual via ordens a mercado. Precisa ser estritamente positiva:
+                ordens enviadas a partir do fechamento seriam recusadas pela bolsa.
         """
         super().__init__(
             id,
@@ -100,17 +119,31 @@ class AvellanedaStoikovAgent(TradingAgent):
         self.use_obi = use_obi
         self.use_hedge = use_hedge
         self.use_kill_switch = use_kill_switch
-        self.eta_obi = eta_ofi
+        self.eta_obi = eta_obi
         self.obi_proxy = 0.0
 
-        self.is_hedged = False  # Estado inicial do derivativo
-        self.hedge_threshold = 150  # Inventário crítico antes da trava no SPY
-        self.hedge_cost_cents = 2  # Custo financeiro simulado do spread (SPY)
-        # --- NOVAS VARIÁVEIS DE HEDGE CONTÍNUO ---
-        self.hedge_qty = 0      # Quantidade retida do ETF
-        self.hedge_cash = 0.0   # Fluxo de caixa exclusivo das operações do ETF
+        self.is_hedged = False  # Estado inicial da posição de proteção
+        self.hedge_threshold = hedge_threshold  # Inventário crítico antes da trava
+        self.hedge_cost_cents = hedge_cost_cents  # Custo de fricção por ação coberta
+        # --- VARIÁVEIS DE HEDGE CONTÍNUO ---
+        # A posição de proteção é sintética: precificada no mid do PRÓPRIO ativo,
+        # sem basis risk, sem latência e sem trânsito pela bolsa. Vive fora de
+        # self.holdings e só é liquidada contra o caixa em kernelStopping.
+        self.hedge_qty = 0      # Quantidade retida da posição sintética
+        self.hedge_cash = 0.0   # Fluxo de caixa exclusivo das operações de proteção
 
-        self.kill_switch_sigma2 = 50.0  # Tolerância máxima de variância (entropia)
+        # Tolerância máxima de variância (entropia), em dólares ao quadrado.
+        self.kill_switch_sigma2 = kill_switch_sigma2
+
+        # --- LIQUIDAÇÃO TERMINAL ---
+        # Instante a partir do qual o agente deixa de cotar e passa a desfazer o
+        # inventário. Calculado no kernelStarting, quando o horizonte é conhecido.
+        self.liquidation_lead = pd.Timedelta(liquidation_lead)
+        self.liquidation_start: Optional[pd.Timestamp] = None
+        # Inventário observado no último envio de liquidação. Serve de guarda contra
+        # envios redundantes: o kernel pode despertar o agente mais de uma vez antes
+        # de a execução ser confirmada, e sem ela a posição seria invertida.
+        self.last_liquidation_qty: Optional[int] = None
 
         # --- GESTÃO ASSÍNCRONA HFT ---
         # Tracking em tempo constante O(1) de ordens moribundas para evitar Liquidity Dropouts
@@ -152,6 +185,9 @@ class AvellanedaStoikovAgent(TradingAgent):
         # Simula o tempo de processamento das equações diferenciais (HJB) no silício.
         # Definido para 10 microssegundos (10.000 nanosegundos).
         self.setComputationDelay(10000)
+
+        if self.horizon_end is not None:
+            self.liquidation_start = self.horizon_end - self.liquidation_lead
 
         if self.mkt_open is not None:
             self.setWakeup(self.mkt_open)
@@ -232,6 +268,17 @@ class AvellanedaStoikovAgent(TradingAgent):
                 self.setWakeup(currentTime + self.getWakeFrequency())
                 return
 
+            # --- JANELA DE LIQUIDAÇÃO TERMINAL ---
+            # Na aproximação do horizonte, o agente suspende a provisão de liquidez
+            # passiva e desfaz o inventário residual a mercado. Continua a despertar
+            # até o fechamento para reenviar o saldo caso a execução seja parcial.
+            if self.liquidation_start is not None and currentTime >= self.liquidation_start:
+                self.cancelAllOrders()
+                self._liquidate_inventory()
+                if self.horizon_end is not None and currentTime < self.horizon_end:
+                    self.setWakeup(currentTime + self.getWakeFrequency())
+                return
+
             if self.horizon_end is not None and currentTime >= self.horizon_end:
                 self.cancelAllOrders()
                 return
@@ -298,6 +345,49 @@ class AvellanedaStoikovAgent(TradingAgent):
             cancel(order)
             dead_orders.add(order.order_id)
 
+    def _liquidate_inventory(self) -> None:
+        """
+        Desfaz o inventário residual do agente por meio de ordem a mercado.
+
+        Executada na janela de liquidação terminal (ver `liquidation_lead`). Uma posição
+        comprada (q_t > 0) é encerrada por venda a mercado e uma posição vendida (q_t < 0)
+        por compra a mercado. A cada despertar subsequente o saldo é reavaliado, o que
+        cobre execuções parciais por exaustão do livro.
+
+        Note:
+            Duas particularidades do ABIDES condicionam esta implementação. Primeira, o
+            kernel desperta o agente mais de uma vez por ciclo durante esta janela, em
+            instantes separados pelo atraso computacional; o envio é portanto condicionado
+            à variação do inventário desde a última tentativa, pois inventário inalterado
+            significa ordem ainda em voo, e reenviar inverteria a posição em vez de zerá-la.
+            Segunda, a bolsa decompõe a ordem a mercado em novas ordens ao percorrer o
+            livro e devolve as execuções sob identificadores distintos do submetido, de
+            modo que a ordem original jamais é retirada de `self.orders`. Ela é removida
+            manualmente para não contaminar as rotinas de reconciliação, que pressupõem
+            ordens limitadas e acessam `limit_price`.
+
+        Sem esta rotina o inventário terminal do agente reflete apenas a posição acumulada,
+        e não o resultado efetivamente realizável, viesando a marcação a mercado final.
+        """
+        q_t = int(self.getHoldings(self.symbol))
+
+        if q_t == 0:
+            return
+
+        # Inventário inalterado desde a tentativa anterior: ordem ainda não executada.
+        if self.last_liquidation_qty is not None and q_t == self.last_liquidation_qty:
+            return
+
+        # q_t > 0 exige venda (is_buy_order=False); q_t < 0 exige compra.
+        known_orders = set(self.orders)
+        self.placeMarketOrder(self.symbol, abs(q_t), q_t < 0)
+
+        for order_id in set(self.orders) - known_orders:
+            del self.orders[order_id]
+
+        self.last_liquidation_qty = q_t
+        self.logEvent("TERMINAL_LIQUIDATION", f"unwind={-q_t}")
+
     def _compute_mid_cents(self) -> int:
         """
         Processa o estado atual do Limit Order Book e calcula o sinal de microestrutura (OBI).
@@ -356,28 +446,40 @@ class AvellanedaStoikovAgent(TradingAgent):
 
     def _estimate_sigma2(self) -> float:
         """
-        Estima a variância instantânea (sigma^2) do ativo com base em retornos logarítmicos.
+        Estima a variância instantânea (sigma^2) do ativo em UNIDADE DE PREÇO.
 
-        Esta função foi reescrita para remover o overhead completo do interpretador Python e
-        do Pandas no hot path. Extrai os dados do deque diretamente para um ndarray C-contíguo.
+        O modelo de Avellaneda-Stoikov pressupõe movimento Browniano aritmético,
+        dS_t = sigma * dW_t, no qual sigma carrega unidade de preço por raiz de tempo
+        e sigma^2 unidade de preço ao quadrado. O estimador consistente com essa
+        hipótese é, portanto, o desvio padrão das PRIMEIRAS DIFERENÇAS do preço,
+        e não o dos retornos logarítmicos.
+
+        Nota de implementação: a versão anterior estimava sigma sobre log-retornos,
+        grandeza adimensional da ordem de 1e-5 para um ativo de USD 1.000. Combinada
+        ao piso min_sigma, produzia sigma^2 travado em 1e-8, o que tornava o termo de
+        controlo de inventário (q * gamma * sigma^2 * tau) três ordens de grandeza
+        inferior ao tick size. O agente degenerava, na prática, num cotador de spread
+        fixo, sem qualquer resposta ao inventário retido.
+
+        Otimização HFT: opera sobre ndarray C-contíguo extraído do deque, sem Pandas
+        e sem laços do interpretador no hot path.
 
         Returns:
-            float: A variância (sigma^2) estrita e limitada a um piso (min_sigma^2) para evitar
-                   indeterminações matemáticas na equação HJB.
+            float: A variância (sigma^2) em preço ao quadrado (dólares^2), limitada
+                   inferiormente por min_sigma^2 para evitar indeterminações na HJB.
         """
         if len(self.mid_history) < 5:
             return float(self.min_sigma**2)
 
-        # 1. Extração estrita do deque para matriz em C
+        # 1. Extração estrita do deque para matriz em C (valores em dólares)
         vals = np.array(self.mid_history, dtype=np.float64)
 
-        # 2. Operações vetorizadas puras no NumPy.
-        # A flag type: ignore silencia o falso positivo de overload do Pylance
-        log_vals = np.log(vals)  # type: ignore
-        log_returns = np.diff(log_vals)
+        # 2. Primeiras diferenças: variação de preço por intervalo de despertar.
+        # Preserva a unidade de preço exigida pelo movimento Browniano aritmético.
+        price_diffs = np.diff(vals)
 
         # 3. Fatiamento estrito da última janela válida
-        window = log_returns[-self.vol_window :]
+        window = price_diffs[-self.vol_window :]
 
         if len(window) < 2:
             return float(self.min_sigma**2)
@@ -548,7 +650,10 @@ class AvellanedaStoikovAgent(TradingAgent):
             else:
                 virtual_cash = self.holdings["CASH"]
 
-            log_str = f"inv={q_t} mid={mid_cents} bid={bid_cents} ask={ask_cents} obi={self.obi_proxy:.2f} cash={virtual_cash}"
+            log_str = (
+                f"inv={q_t} mid={mid_cents} bid={bid_cents} ask={ask_cents} "
+                f"obi={self.obi_proxy:.2f} cash={virtual_cash} sigma2={sigma2:.9e}"
+            )
             self.logEvent("AS_QUOTE", log_str)
 
         except Exception as e:
