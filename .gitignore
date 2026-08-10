@@ -20,3 +20,10 @@ ABIDES_Enviroment/
 
 # Ignora pastas do sistema operacional
 .DS_Store
+
+# Logs de execucao dos orquestradores
+*.log
+
+# Snapshots intermediarios de execucoes parciais
+*_SNAPSHOT.csv
+*_SNAPSHOT.json
