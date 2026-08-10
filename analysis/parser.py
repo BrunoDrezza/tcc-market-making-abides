@@ -32,15 +32,22 @@ def parse_as_metrics(df, starting_cash=10000000):
     # 2. Descobre qual é a coluna de texto
     text_col = 'Event' if 'Event' in df_quotes.columns else 'Message'
 
-    # 3. Regex atualizada para capturar OBI e CASH
-    regex = r"inv=(?P<inv>[-\d\.]+)\s+mid=(?P<mid>[-\d\.]+)\s+bid=(?P<bid>[-\d\.]+)\s+ask=(?P<ask>[-\d\.]+)\s+obi=(?P<obi>[-\d\.]+)\s+cash=(?P<cash>[-\d\.]+)"
+    # 3. Regex para capturar OBI, CASH e a variancia estimada.
+    # sigma2 e emitido em notacao cientifica, logo a classe de caracteres precisa
+    # admitir 'e', 'E' e o sinal do expoente.
+    regex = (
+        r"inv=(?P<inv>[-\d\.]+)\s+mid=(?P<mid>[-\d\.]+)\s+bid=(?P<bid>[-\d\.]+)"
+        r"\s+ask=(?P<ask>[-\d\.]+)\s+obi=(?P<obi>[-\d\.]+)\s+cash=(?P<cash>[-\d\.]+)"
+        r"\s+sigma2=(?P<sigma2>[-+\d\.eE]+)"
+    )
     extracted = df_quotes[text_col].str.extract(regex)
-    
+
     # 4. Junta tudo e converte tipos
+    cols = ['inv', 'mid', 'bid', 'ask', 'obi', 'cash', 'sigma2']
     parsed_df = pd.concat([df_quotes, extracted], axis=1)
-    parsed_df = parsed_df.dropna(subset=['inv', 'mid', 'bid', 'ask', 'obi', 'cash'])
-    
-    for col in ['inv', 'mid', 'bid', 'ask', 'obi', 'cash']:
+    parsed_df = parsed_df.dropna(subset=cols)
+
+    for col in cols:
         parsed_df[col] = pd.to_numeric(parsed_df[col], errors='coerce')
 
     # 5. Arruma o índice temporal
@@ -60,4 +67,4 @@ def parse_as_metrics(df, starting_cash=10000000):
     parsed_df['Returns'] = np.log(parsed_df['Equity'] / parsed_df['Equity'].shift(1)).fillna(0) # type: ignore
     
     print(f"Sucesso! {len(parsed_df)} cotações processadas com MtM dinâmico e Retornos.")
-    return parsed_df[['inv', 'mid', 'bid', 'ask', 'obi', 'cash', 'PnL', 'Equity', 'Returns']]
+    return parsed_df[['inv', 'mid', 'bid', 'ask', 'obi', 'cash', 'sigma2', 'PnL', 'Equity', 'Returns']]
