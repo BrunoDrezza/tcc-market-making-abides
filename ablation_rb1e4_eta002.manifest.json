@@ -1,0 +1,24 @@
+{
+  "parametros": {
+    "as_colocate": true,
+    "base_seed": 20240101,
+    "end_time": "11:30:00",
+    "eta_obi": 0.02,
+    "fund_vol": 1e-08,
+    "gamma": 0.5,
+    "k": 100.0,
+    "kill_sigma2": 0.001779239,
+    "lean_logs": true,
+    "mm_backstop_quantity": 50000.0,
+    "mm_count": 2,
+    "num_noise": 5000,
+    "out": "ablation_rb1e4_eta002.csv",
+    "pov": 0.25,
+    "r_bar": 10000.0,
+    "raw_out": "ablation_rb1e4_eta002_raw.csv",
+    "seeds": 20,
+    "workers": 3
+  },
+  "n_celulas": 8,
+  "n_simulacoes": 160
+}

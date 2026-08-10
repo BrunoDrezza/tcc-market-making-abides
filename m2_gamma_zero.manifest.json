@@ -1,0 +1,26 @@
+{
+  "parametros": {
+    "as_colocate": true,
+    "base_seed": 20240101,
+    "end_time": "11:30:00",
+    "fund_vol": 1e-08,
+    "gammas": [
+      0.1,
+      0.01
+    ],
+    "ks": [
+      100.0
+    ],
+    "lean_logs": true,
+    "mm_backstop_quantity": 50000.0,
+    "mm_count": 2,
+    "num_noise": 5000,
+    "out": "m2_gamma_zero.csv",
+    "r_bar": 10000.0,
+    "raw_out": "m2_gamma_zero_raw.csv",
+    "seeds": 4,
+    "workers": 3
+  },
+  "n_celulas": 2,
+  "n_simulacoes": 8
+}

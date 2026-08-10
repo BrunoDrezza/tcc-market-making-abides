@@ -1,0 +1,28 @@
+{
+  "parametros": {
+    "as_colocate": true,
+    "base_seed": 20240101,
+    "end_time": "11:30:00",
+    "fund_vol": 1e-08,
+    "gammas": [
+      0.5
+    ],
+    "ks": [
+      20.0,
+      50.0,
+      100.0,
+      200.0
+    ],
+    "lean_logs": true,
+    "mm_backstop_quantity": 50000.0,
+    "mm_count": 2,
+    "num_noise": 5000,
+    "out": "horizonte_rb1e5.csv",
+    "r_bar": 100000.0,
+    "raw_out": "horizonte_rb1e5_raw.csv",
+    "seeds": 2,
+    "workers": 3
+  },
+  "n_celulas": 4,
+  "n_simulacoes": 8
+}
