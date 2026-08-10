@@ -95,6 +95,35 @@ parser.add_argument("--mm-skew-beta", type=float, default=0)
 parser.add_argument("--mm-level-spacing", type=float, default=5)
 parser.add_argument("--mm-spread-alpha", type=float, default=0.75)
 parser.add_argument("--mm-backstop-quantity", type=float, default=50000)
+parser.add_argument(
+    "--mm-count", type=int, default=2,
+    help="Numero de AdaptiveMarketMakerAgent incumbentes. O RMSC03 canonico usa 2. "
+         "Reduzir para 1 (ou 0) rarefaz a provisao de liquidez concorrente e alarga "
+         "o spread de mercado, criando premio de liquidez disputavel pelo agente A-S."
+)
+parser.add_argument(
+    "--r-bar", type=float, default=1e5,
+    help="Nivel de preco do fundamental, em centimos. O RMSC03 canonico usa 1e5 "
+         "(USD 1.000), o que torna o tick de 1 centimo equivalente a um decimo de "
+         "ponto-base e trava o livro no incremento minimo. Reduzir aumenta o tick "
+         "relativo. As grandezas do oraculo sao reescaladas proporcionalmente, de "
+         "modo que apenas o tick relativo varie."
+)
+parser.add_argument(
+    "--num-noise", type=int, default=5000,
+    help="Numero de agentes de ruido. O RMSC03 canonico usa 5000; reduzir rarefaz "
+         "o fluxo nao informado e tende a alargar o spread de equilibrio."
+)
+parser.add_argument(
+    "--num-value", type=int, default=100,
+    help="Numero de agentes de valor (fluxo informado)."
+)
+parser.add_argument(
+    "--as-colocate", action="store_true",
+    help="Iguala o perfil de latencia do agente A-S ao do primeiro market maker "
+         "incumbente, eliminando a assimetria de posicao geografica sorteada. "
+         "Isola o efeito da estrategia do efeito da co-locacao."
+)
 
 parser.add_argument(
     "--fund-vol",
@@ -114,6 +143,26 @@ parser.add_argument(
 )
 parser.add_argument('--gamma', type=float, default=1.0, help='Aversão ao risco do AS')
 parser.add_argument('--k', type=float, default=10.0, help='Sensibilidade de execução do AS')
+parser.add_argument(
+    '--eta-obi', type=float, default=0.5,
+    help='Sensibilidade do preditor OBI no deslocamento do preço de reserva'
+)
+parser.add_argument(
+    '--kill-sigma2', type=float, default=1.0e-2,
+    help='Limiar de variância (dólares^2) da Camada 3. Calibrar sobre a distribuição '
+         'empírica de sigma^2 de um cenário de referência.'
+)
+parser.add_argument(
+    '--liquidation-lead', type=str, default='60s',
+    help='Antecedência sobre o fechamento para desfazer o inventário a mercado'
+)
+parser.add_argument(
+    '--lean-logs', action='store_true',
+    help='Suprime o log de ordens da bolsa e a série do livro de ofertas. '
+         'Reduz drasticamente o consumo de memória, viabilizando mais simulações '
+         'simultâneas. Preserva o log do agente A-S, único insumo do pipeline de '
+         'análise. Não usar quando forem necessários os fatos estilizados.'
+)
 
 args, remaining_args = parser.parse_known_args()
 
@@ -130,9 +179,9 @@ np.random.seed(seed)
 util.silent_mode = not args.verbose
 LimitOrder.silent_mode = not args.verbose
 
-exchange_log_orders = True
+exchange_log_orders = not args.lean_logs
 log_orders = False
-book_freq = '1S'
+book_freq = None if args.lean_logs else '1S'
 
 simulation_start_time = dt.datetime.now()
 print("Simulation Start Time: {}".format(simulation_start_time))
@@ -150,10 +199,24 @@ agent_count, agents, agent_types = 0, [], []
 symbol = args.ticker
 starting_cash = 10000000  # Cash in this simulator is always in CENTS.
 
-r_bar = int(1e5)
+# Nivel de preco do fundamental, em centimos. E o parametro que determina o TICK
+# RELATIVO: com r_bar = 1e5 (USD 1.000) e tick de 1 centimo, o tick vale um decimo
+# de ponto-base, e o livro permanece travado no incremento minimo independentemente
+# da populacao. Acoes liquidas reais negociam entre USD 20 e 200, onde o tick
+# relativo e uma a duas ordens de grandeza maior.
+r_bar = int(args.r_bar)
 sigma_n = int(r_bar / 10)
 kappa = 1.67e-15
 lambda_a = 7e-11
+
+# As grandezas do oraculo sao absolutas em centimos. Reescala-las na proporcao de
+# r_bar preserva a dinamica RELATIVA do fundamental, de modo que a unica coisa que
+# varia ao mexer no nivel de preco seja o tamanho relativo do tick. O desvio padrao
+# do megashock escala linearmente; sua variancia, portanto, quadraticamente.
+_price_scale_ratio = r_bar / 1e5
+fund_vol_scaled = args.fund_vol * _price_scale_ratio
+megashock_mean_scaled = 1e3 * _price_scale_ratio
+megashock_var_scaled = 5e4 * (_price_scale_ratio ** 2)
 
 # Oracle
 symbols = {
@@ -161,10 +224,10 @@ symbols = {
         "r_bar": r_bar,
         "kappa": 1.67e-16,
         "sigma_s": 0,
-        "fund_vol": args.fund_vol,
+        "fund_vol": fund_vol_scaled,
         "megashock_lambda_a": 2.77778e-18,
-        "megashock_mean": 1e3,
-        "megashock_var": 5e4,
+        "megashock_mean": megashock_mean_scaled,
+        "megashock_var": megashock_var_scaled,
         "random_state": np.random.RandomState(
             seed=np.random.randint(low=0, high=2**32, dtype="uint64")
         ),
@@ -202,7 +265,7 @@ agent_types.append("ExchangeAgent")
 agent_count += 1
 
 # 2) Noise Agents
-num_noise = 5000
+num_noise = args.num_noise
 noise_mkt_open = historical_date + pd.to_timedelta("09:00:00")
 noise_mkt_close = historical_date + pd.to_timedelta("16:00:00")
 agents.extend(
@@ -226,7 +289,7 @@ agent_count += num_noise
 agent_types.extend(["NoiseAgent"])
 
 # 3) Value Agents
-num_value = 100
+num_value = args.num_value
 agents.extend(
     [
         ValueAgent(
@@ -259,17 +322,13 @@ mm_params = [
         args.mm_num_ticks,
         args.mm_wake_up_freq,
         args.mm_min_order_size,
-    ),
-    (
-        args.mm_window_size,
-        args.mm_pov,
-        args.mm_num_ticks,
-        args.mm_wake_up_freq,
-        args.mm_min_order_size,
-    ),
-]
+    )
+] * args.mm_count
 
 num_mm_agents = len(mm_params)
+# Primeiro identificador da faixa de market makers incumbentes. Serve de
+# referencia para a co-locacao opcional do agente A-S.
+mm_first_id = agent_count
 mm_cancel_limit_delay = 50  # 50 nanoseconds
 
 agents.extend(
@@ -329,6 +388,8 @@ agent_types.append("MomentumAgent")
 
 # 6) Avellaneda-Stoikov Market Maker Agent
 
+as_agent_id = agent_count
+
 agents.extend(
     [
         AvellanedaStoikovAgent(
@@ -341,6 +402,9 @@ agents.extend(
             use_obi=args.use_obi,
             use_hedge=args.use_hedge,
             use_kill_switch=args.use_kill_switch,
+            eta_obi=args.eta_obi,
+            kill_switch_sigma2=args.kill_sigma2,
+            liquidation_lead=args.liquidation_lead,
             # ----------------------------------------
             order_size=100,
             wake_up_freq="1s",
@@ -421,6 +485,25 @@ nyc_to_seattle_meters = 3866660
 pairwise_distances = util.generate_uniform_random_pairwise_dist_on_line(
     0.0, nyc_to_seattle_meters, agent_count, random_state=latency_rstate
 )
+
+# --- CONTROLE DE CO-LOCACAO ---
+# As latencias derivam de posicoes sorteadas sobre uma reta, de modo que o agente
+# A-S pode receber, por acaso, posicao sistematicamente pior que a dos market
+# makers incumbentes. Para isolar o efeito da estrategia do efeito da posicao
+# geografica, copia-se o perfil de distancias do primeiro incumbente para o
+# agente A-S, o que equivale a co-loca-los.
+if args.as_colocate and num_mm_agents > 0:
+    pairwise_distances[as_agent_id, :] = pairwise_distances[mm_first_id, :]
+    pairwise_distances[:, as_agent_id] = pairwise_distances[:, mm_first_id]
+    pairwise_distances[as_agent_id, as_agent_id] = 0.0
+    pairwise_distances[as_agent_id, mm_first_id] = 0.0
+    pairwise_distances[mm_first_id, as_agent_id] = 0.0
+    print(
+        "Co-locacao ativa: agente A-S ({}) herda o perfil de latencia do MM {}".format(
+            as_agent_id, mm_first_id
+        )
+    )
+
 pairwise_latencies = util.meters_to_light_ns(pairwise_distances)
 
 model_args = {"connected": True, "min_latency": pairwise_latencies}
