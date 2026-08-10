@@ -40,7 +40,7 @@ graph TD
     subgraph AS_Agent [AvellanedaStoikovAgent.py]
         direction TB
         Calc[Cálculo de Cotações Ótimas <br/> r_t e delta]
-        L1[Camada 1: OFI Proxy <br/> Preditor Direcional]
+        L1[Camada 1: OBI Proxy <br/> Preditor Direcional]
         L2[Camada 2: Hedge Sintético <br/> Controle de Inventário SPY]
         L3[Camada 3: Kill Switch <br/> Filtro de Entropia]
 
@@ -61,8 +61,8 @@ A infraestrutura estende o ABIDES original com os seguintes componentes autorais
 
 ### 1. O Cérebro: `agent/market_makers/AvellanedaStoikovAgent.py`
 A implementação *from scratch* da teoria em código. O agente calcula a volatilidade em tempo real (janelas móveis) e recalcula as cotações a cada milissegundo. Inclui 3 camadas de defesa paramétricas:
-- **Camada 1 (OFI Proxy):** Mede o *Order Flow Imbalance* para deslocar o preço de reserva ($r_t$) preventivamente contra o fluxo direcional.
-- **Camada 2 (Hedge Sintético):** Ao atingir um limite crítico de inventário, o robô trava o risco simulando a tomada de spread no ETF (SPY), descontando o custo financeiro direto no PnL.
+- **Camada 1 (OBI Proxy):** Mede o *Order Book Imbalance* para deslocar o preço de reserva ($r_t$) preventivamente contra o fluxo direcional.
+- **Camada 2 (Hedge Sintético):** Ao atingir um limite crítico de inventário, o robô trava o excesso de risco em uma posição sintética precificada no mid do próprio ativo, descontando um custo de fricção de 2 cêntimos por ação diretamente no PnL. Não há execução em instrumento correlacionado nem *basis risk* modelado.
 - **Camada 3 (Kill Switch):** Monitora a variância ($\sigma^2$). Em caso de entropia/flash crash (quebra da hipótese de Movimento Browniano), o robô cancela ordens e suspende a liquidez.
 
 ### 2. A Arena: `config/rmsc03_as.py`
@@ -71,11 +71,11 @@ Configuração de ecossistema customizada. Injeta o nosso robô em um ambiente d
 ### 3. Orquestração e Estudo de Ablação: `run_ablation_study.py`
 Um *pipeline* de automação (Grid Search) que utiliza `itertools` para iterar sobre 8 configurações arquiteturais do agente (ligando e desligando as camadas de defesa). Permite provar estatisticamente o impacto isolado de cada mitigador de risco contra o *baseline* clássico.
 
-### 4. Telemetria e *Parsing*: `analysis/run_analysis.py`
+### 4. Telemetria e *Parsing*: `run_analysis.py`
 Processador de logs pós-simulação. Descompacta os arquivos do ABIDES, filtra os eventos do `AvellanedaStoikovAgent` e plota três dinâmicas essenciais:
 - Gráfico de Dinâmica de Preços (Mid-price vs Bid/Ask spread dinâmico).
 - Gráfico de Evolução do Inventário ($q_t$).
-- Gráfico de Análise de Impacto de Mercado (OFI e Slippage).
+- Gráfico de Análise de Impacto de Mercado (OBI e Slippage).
 
 ---
 
@@ -87,13 +87,13 @@ python abides.py -c rmsc03_as -t ABM -d 20240101 -l TCC_Base
 ```
 
 **2. Executar o Estudo de Ablação Completo (8 Cenários sob Estresse)**
-Este script rodará todas as permutações das camadas de defesa contra uma agressão direcional de 10% do mercado.
+Este script rodará todas as permutações das camadas de defesa contra uma agressão direcional de 25% do volume (`-p 0.25`).
 ```bash
 python run_ablation_study.py
 ```
 
 **3. Extrair Telemetria e Gráficos**
 ```bash
-python run_analysis.py --log_dir log/TCC_Ablation_OFI_True_HEDGE_True_KILL_True
+python run_analysis.py --log_dir log/TCC_Ablation_OBI_True_HEDGE_True_KILL_True
 ```
 *Os gráficos em PNG serão exportados para a pasta `analysis_output/`.*

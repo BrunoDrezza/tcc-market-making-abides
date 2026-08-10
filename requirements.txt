@@ -1,16 +1,35 @@
-cycler==0.10.0
-joblib==0.13.2
-jsons==0.8.8
-kiwisolver==1.1.0
-matplotlib==3.0.3
-numpy==1.16.3
-pandas==0.25.1
-pprofile==2.0.2
-pyparsing==2.4.0
-python-dateutil==2.8.0
-pytz==2019.1
-scipy==1.2.1
-seaborn==0.9.0
-six==1.12.0
-tqdm==4.36.1
-psutil
+# Ambiente de execucao do ABIDES sob Python 3.9.
+#
+# Os pins originais do ABIDES (numpy 1.16.3 / pandas 0.25.1, era Python 3.7)
+# nao compilam em Python 3.9: numpy 1.16.3 falha na build com
+# "NameError: name 'CCompiler' is not defined", por incompatibilidade entre o
+# numpy.distutils daquela versao e o setuptools moderno. Nao ha wheel cp39.
+#
+# Este conjunto e a relaxacao minima com wheels para cp39. Verificou-se que o
+# codigo do ABIDES nao usa nenhuma API removida no pandas 1.x (.ix, pd.np,
+# Panel, .iteritems, .get_values), o que torna a migracao segura.
+#
+# pprofile foi removido: quebra na build com "use_2to3 is invalid" e serve
+# apenas para profiling, nao sendo necessario para executar simulacoes.
+#
+# Reproducao:
+#   uv venv --python 3.9 ABIDES_Enviroment
+#   uv pip install --python ABIDES_Enviroment/bin/python -r requirements.txt
+
+cycler==0.11.0
+joblib==1.1.1
+jsons==1.6.3
+kiwisolver==1.3.2
+matplotlib==3.3.4
+numpy==1.19.5
+pandas==1.1.5
+pillow==11.3.0
+psutil==5.9.8
+pyparsing==2.4.7
+python-dateutil==2.8.2
+pytz==2021.3
+scipy==1.5.4
+seaborn==0.11.2
+six==1.16.0
+tqdm==4.62.3
+typish==1.9.3
